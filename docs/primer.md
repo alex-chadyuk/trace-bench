@@ -71,7 +71,7 @@ dense integers; every op has a `kind`, a `service` and a `depth`.
 
 At instantiation the generator samples a **deployment call topology**: a set of
 call edges from a caller op to a callee op. The topology is a **layered DAG at
-the endpoint level**: the BFF is depth 0, a depth-$d$ endpoint only calls
+the endpoint level**: the BFF is depth 0, an endpoint at depth $d$ only calls
 endpoints strictly deeper than $d$, and externals sit below everyone. Two
 consequences follow immediately: every request tree is acyclic, and every
 backend endpoint has one well-defined depth.
@@ -426,7 +426,7 @@ held parent, found by power iteration.
 **Worked example: pool drives health.** Under a free pool the health chain has
 hazards degrade $0.0005$, fail-given-degraded $0.01$, recover $0.02$. Balancing
 the flows of this birth-death chain gives
-${\pi_1 = 0.025\,\pi_0}$ and ${\pi_2 = 0.5\,\pi_1}$, so the stationary vector is
+${\pi_1 = 0.025\pi_0}$ and ${\pi_2 = 0.5\pi_1}$, so the stationary vector is
 ${(0.964,\ 0.024,\ 0.012)}$ over (healthy, degraded, failed). Under an
 exhausted pool the degrade hazard is $0.05$ and recovery is switched off, so
 healthy is transient and all mass ends in ${(0,\ 0.667,\ 0.333)}$. The strength
@@ -532,7 +532,7 @@ chain* ${X \to M \to Y}$ the order cannot matter in the direction the PRD
 worries about, because total variation is contracted by any Markov kernel:
 
 $$
-\mathrm{TV}\big(P(Y \mid \mathrm{do}\,x_1),\ P(Y \mid \mathrm{do}\,x_2)\big) \le \mathrm{TV}\big(P(M \mid x_1),\ P(M \mid x_2)\big),
+\mathrm{TV}\big(P(Y \mid \mathrm{do}(x_1)),\ P(Y \mid \mathrm{do}(x_2))\big) \le \mathrm{TV}\big(P(M \mid x_1),\ P(M \mid x_2)\big),
 $$
 
 so a chain of sub-floor links composes to something sub-floor. Where the order
@@ -561,7 +561,7 @@ For source value $x$ and destination value $y$, the **directed token strength**
 is the one-versus-rest Bernoulli total variation under uniform replacement:
 
 $$
-s\big((X{,}x) \to (Y{,}y)\big) = \Big\lvert\, P(Y{=}y \mid \mathrm{do}(X{=}x)) - \operatorname{mean}_{x' \neq x} P(Y{=}y \mid \mathrm{do}(X{=}x'))\,\Big\rvert .
+s\big((X{,}x) \to (Y{,}y)\big) = \Big\lvert P(Y{=}y \mid \mathrm{do}(X{=}x)) - \mathrm{mean}_{x' \neq x}\ P(Y{=}y \mid \mathrm{do}(X{=}x'))\Big\rvert .
 $$
 
 Read it as: how much does the probability of seeing token $(Y, y)$ move when
@@ -808,11 +808,11 @@ The output is four parquet trees in the column contract of the lab's sequence
 pipeline (`trace_id, ops, outcomes, offsets, durations, parent_pos, ...`):
 
 $$
-\{\text{end}, \text{start}\} \times \{\text{request}, \text{session}\}
+\lbrace\text{end}, \text{start}\rbrace \times \lbrace\text{request}, \text{session}\rbrace
 $$
 
 `end` ordering sorts spans by completion time, so a callee precedes its caller
-and ${\texttt{parent\_pos}[j] > j}$; `start` ordering sorts by start time. Both
+and `parent_pos[j] > j`; `start` ordering sorts by start time. Both
 are shipped because **the ordering decides which edges an earlier-to-later test
 can express at all**. Millisecond ties are broken by containment, then by
 inferred depth; genuine inversions are counted, never repaired.
@@ -861,7 +861,7 @@ sweep:
   one per unordered pair whose edge state (any subset of $\to$, $\leftarrow$,
   $\leftrightarrow$) differs.
 - **Baselines** the SHD is charged against: the empty graph (its SHD equals the
-  number of true edges) and the top-$k$ prediction by score with $k$ set to the
+  number of true edges) and the top $k$ predicted edges by score, with $k$ set to the
   number of true edges.
 - **Causal validity** (SID, parent-AID, ancestor-AID via `gadjid`) on the twin's
   DAG, with a reason string wherever it is not applicable.
@@ -883,16 +883,16 @@ and quantiles.
 ### 12.3 Worked example: five tokens
 
 Tokens $a, b, c, d, e$ belong to five distinct operations, all pairs in
-support. Truth at the floor: directed ${\{a \to b,\ b \to c,\ d \to c\}}$,
-bidirected ${\{b \leftrightarrow e\}}$. A method predicts directed
-${\{a \to b,\ c \to b,\ d \to c,\ a \to d\}}$ and bidirected
-${\{b \leftrightarrow e\}}$, all with score 1.
+support. Truth at the floor: directed ${\lbrace a \to b,\ b \to c,\ d \to c\rbrace}$,
+bidirected ${\lbrace b \leftrightarrow e\rbrace}$. A method predicts directed
+${\lbrace a \to b,\ c \to b,\ d \to c,\ a \to d\rbrace}$ and bidirected
+${\lbrace b \leftrightarrow e\rbrace}$, all with score 1.
 
-**Directed.** True positives ${\{a \to b, d \to c\}}$, false positives
-${\{c \to b, a \to d\}}$, false negative ${\{b \to c\}}$: precision $0.50$,
+**Directed.** True positives ${\lbrace a \to b, d \to c\rbrace}$, false positives
+${\lbrace c \to b, a \to d\rbrace}$, false negative ${\lbrace b \to c\rbrace}$: precision $0.50$,
 recall $0.667$, F1 $0.571$, SHD $3$.
 
-**Skeleton.** Truth ${\{ab, bc, cd, be\}}$, predicted ${\{ab, bc, cd, be, ad\}}$:
+**Skeleton.** Truth ${\lbrace ab, bc, cd, be\rbrace}$, predicted ${\lbrace ab, bc, cd, be, ad\rbrace}$:
 precision $0.80$, recall $1.0$, F1 $0.889$, SHD $1$.
 
 **Orientation.** Eligible skeleton true positives are $ab$, $bc$, $cd$ ($be$ is
@@ -903,11 +903,11 @@ reaches $ab$, which stays reversible. Compelled accuracy is $1/2$.
 
 **Bidirected.** One true, one predicted, matching: F1 $1.0$.
 
-**Mixed SHD.** Pair $(b, c)$ has state ${\{\to\}}$ in truth and ${\{\leftarrow\}}$
-in the prediction; pair $(a, d)$ has ${\{\}}$ versus ${\{\to\}}$. Mixed SHD $2$.
+**Mixed SHD.** Pair $(b, c)$ has state ${\lbrace\to\rbrace}$ in truth and ${\lbrace\leftarrow\rbrace}$
+in the prediction; pair $(a, d)$ has ${\lbrace\rbrace}$ versus ${\lbrace\to\rbrace}$. Mixed SHD $2$.
 
 **Baselines.** Empty-graph directed SHD is $3$, skeleton $4$. With all scores
-tied, the top-$3$ set is taken in key order, ${\{a \to b, a \to d, c \to b\}}$,
+tied, the top-3 set is taken in key order, ${\lbrace a \to b, a \to d, c \to b\rbrace}$,
 whose SHD against the truth is $4$: the method's $3$ beats it, but not by much,
 and the reader now sees why the SHD is always reported beside what the empty
 graph would score.
