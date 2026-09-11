@@ -1,0 +1,85 @@
+# trace-bench named instance `s` — development rung (10 x 5 behind an 8-endpoint BFF, 4 scenarios, one simulated day).
+schema_version: tracebench/config@1
+name: s
+rung: local
+counts: {clients: 200, services: 10, endpoints_per_service: 5, bff_endpoints: 8, scenarios: 4}
+scenarios:
+- name: browse
+  steps: 2
+  weight: 1.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 1
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: search
+  steps: 3
+  weight: 2.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 2
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: detail
+  steps: 4
+  weight: 3.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 1
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: cart
+  steps: 5
+  weight: 1.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 2
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+endpoints:
+  repertoire: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 1
+    retry_on: [5xx]
+topology:
+  depth_pmf: [0.5, 0.35, 0.15]
+  fanout_mean: 2.0
+  external_services: 1
+  criticality_share: 0.7
+  cache_hit_share: 0.3
+mechanism:
+  floor: 0.05
+  sweep: [0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
+  error_rate_multiplier: 10.0
+  ctxmax: true
+  mc_samples: 20000
+schedules:
+  faults:
+  - {component: 'service:2', kind: degrade, start_s: 14400, end_s: 16200}
+  - {component: 'service:5/endpoint:1', kind: crash, start_s: 36000, end_s: 36900}
+  - {component: 'service:7', kind: pool_exhaust, start_s: 54000, end_s: 55200}
+  regimes: []
+run:
+  seed: 0
+  seeds: [0, 1, 2, 3, 4]
+  window: {start: '2026-01-05T00:00:00Z', duration_hours: 24}
+  tick_s: 1
+  shard_ticks: 900
+  base_rps: 5.0
+  cap_gb: 50
+  twin: true
+constants: constants/realism-v1.json
+vocab: {min_count: 20}
+slow: {quantile: 0.95}

@@ -1,0 +1,132 @@
+# trace-bench named instance `m` — real-system-like rung (50 x 10 behind a 20-endpoint BFF, 8 scenarios, two days).
+schema_version: tracebench/config@1
+name: m
+rung: local
+counts: {clients: 2000, services: 50, endpoints_per_service: 10, bff_endpoints: 20,
+  scenarios: 8}
+scenarios:
+- name: browse
+  steps: 2
+  weight: 1.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 1
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: search
+  steps: 3
+  weight: 2.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 2
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: detail
+  steps: 4
+  weight: 3.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 1
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: cart
+  steps: 5
+  weight: 1.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 2
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: checkout
+  steps: 2
+  weight: 2.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 1
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: account
+  steps: 3
+  weight: 3.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 2
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: support
+  steps: 4
+  weight: 1.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 1
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+- name: settings
+  steps: 5
+  weight: 2.0
+  repertoire:
+    client: [ok, err]
+    bff: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 2
+    retry_on: [5xx, err]
+  fatal_error: true
+  terminal_failure: true
+endpoints:
+  repertoire: [ok, 4xx, 5xx, err, slow]
+  retry:
+    max_retries: 1
+    retry_on: [5xx]
+topology:
+  depth_pmf: [0.5, 0.35, 0.15]
+  fanout_mean: 2.0
+  external_services: 1
+  criticality_share: 0.7
+  cache_hit_share: 0.3
+mechanism:
+  floor: 0.05
+  sweep: [0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
+  error_rate_multiplier: 5.0
+  ctxmax: true
+  mc_samples: 20000
+schedules:
+  faults:
+  - {component: 'service:3', kind: degrade, start_s: 12960, end_s: 14760}
+  - {component: 'service:12/endpoint:4', kind: crash, start_s: 30240, end_s: 31140}
+  - {component: 'service:21', kind: pool_exhaust, start_s: 47520, end_s: 49020}
+  - {component: 'service:30', kind: cache_flush, start_s: 62220, end_s: 64620}
+  - {component: 'bff/endpoint:5', kind: degrade, start_s: 76020, end_s: 77220}
+  regimes: []
+run:
+  seed: 0
+  seeds: [0, 1, 2, 3, 4]
+  window: {start: '2026-01-05T00:00:00Z', duration_hours: 24}
+  tick_s: 1
+  shard_ticks: 900
+  base_rps: 4.0
+  cap_gb: 50
+  twin: true
+constants: constants/realism-v1.json
+vocab: {min_count: 20}
+slow: {quantile: 0.95}

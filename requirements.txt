@@ -1,0 +1,10 @@
+# Runtime deps. Versions are pinned to a minor range because byte-identical
+# reproducibility (PRD scenario 12) depends on numpy's Generator streams and on
+# pyarrow's parquet writer; the manifest records the exact versions in force.
+numpy>=2.0,<3
+pyarrow>=25.0,<26
+pydantic>=2.9,<3
+pyyaml>=6.0,<7
+# Optional extras (install with `pip install -e ".[publish,sid]"`):
+#   huggingface_hub  - the publish command only
+#   gadjid           - SID / AID on the observable twin's DAG

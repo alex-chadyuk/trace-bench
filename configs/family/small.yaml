@@ -1,0 +1,27 @@
+# A small family of sampled systems: held-out systems never appear in training.
+schema_version: tracebench/family@1
+name: fam-small
+n_systems: 6
+seed: 0
+ranges:
+  clients: {lo: 20, hi: 60}
+  services: {lo: 3, hi: 6}
+  endpoints_per_service: {lo: 2, hi: 4}
+  bff_endpoints: {lo: 3, hi: 6}
+  scenarios: {lo: 2, hi: 3}
+  fanout_mean: {lo: 1.5, hi: 2.5}
+  steps: {lo: 2, hi: 4}
+split: {test_fraction: 0.34}
+template:
+  schema_version: tracebench/config@1
+  rung: local
+  scenarios:
+    - {repertoire: {client: [ok, err], bff: [ok, 4xx, 5xx, err, slow]}, retry: {max_retries: 1, retry_on: [5xx, err]}, fatal_error: true, terminal_failure: true}
+  endpoints: {repertoire: [ok, 4xx, 5xx, err, slow], retry: {max_retries: 1, retry_on: [5xx]}}
+  topology: {depth_pmf: [0.5, 0.35, 0.15], external_services: 1, criticality_share: 0.7, cache_hit_share: 0.3}
+  mechanism: {floor: 0.05, sweep: [0.01, 0.02, 0.05, 0.10, 0.20, 0.50], error_rate_multiplier: 3.0, ctxmax: false, mc_samples: 5000}
+  schedules: {faults: [], regimes: []}
+  run: {window: {start: "2026-01-05T09:00:00Z", duration_hours: 0.5}, tick_s: 1, shard_ticks: 900, base_rps: 1.0, cap_gb: 50, twin: false}
+  constants: constants/realism-v1.json
+  vocab: {min_count: 5}
+  slow: {quantile: 0.95}

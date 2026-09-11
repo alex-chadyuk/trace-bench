@@ -1,0 +1,652 @@
+{
+  "schema": "tracebench/realism@1",
+  "version": "dev-0",
+  "fitted_at": "2026-09-10",
+  "sources": {
+    "dev": "DEVELOPMENT PLACEHOLDER \u2014 not fitted from any real source. Every named instance must reference a fitted realism-v<N>.json before it is generated for release; this file exists so the generator and its tests can run during implementation."
+  },
+  "leaves": {
+    "latency_quantiles": {
+      "bff": {
+        "p50": {
+          "value": 0.045,
+          "source": "dev",
+          "n": null,
+          "note": "seconds"
+        },
+        "p90": {
+          "value": 0.18,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "p95": {
+          "value": 0.3,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "p99": {
+          "value": 0.9,
+          "source": "dev",
+          "n": null,
+          "note": null
+        }
+      },
+      "service": {
+        "p50": {
+          "value": 0.008,
+          "source": "dev",
+          "n": null,
+          "note": "seconds, own service time per hop"
+        },
+        "p90": {
+          "value": 0.03,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "p95": {
+          "value": 0.055,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "p99": {
+          "value": 0.2,
+          "source": "dev",
+          "n": null,
+          "note": null
+        }
+      },
+      "external": {
+        "p50": {
+          "value": 0.12,
+          "source": "dev",
+          "n": null,
+          "note": "seconds"
+        },
+        "p90": {
+          "value": 0.45,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "p95": {
+          "value": 0.8,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "p99": {
+          "value": 2.5,
+          "source": "dev",
+          "n": null,
+          "note": null
+        }
+      }
+    },
+    "latency_multipliers": {
+      "degraded": {
+        "value": 3.0,
+        "source": "dev",
+        "n": null,
+        "note": "own-time multiplier when the endpoint is DEGRADED"
+      },
+      "pool_tight": {
+        "value": 1.8,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "pool_exhausted": {
+        "value": 4.0,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "cache_cold": {
+        "value": 1.3,
+        "source": "dev",
+        "n": null,
+        "note": "caller own-time multiplier on a cache miss"
+      }
+    },
+    "depth_pmf": {
+      "value": [
+        0.55,
+        0.3,
+        0.15
+      ],
+      "source": "dev",
+      "n": null,
+      "note": "P(max call depth below the BFF = 1, 2, 3)"
+    },
+    "fanout_pmf_by_depth": {
+      "value": [
+        [
+          0.0,
+          0.35,
+          0.35,
+          0.2,
+          0.1
+        ],
+        [
+          0.0,
+          0.5,
+          0.3,
+          0.15,
+          0.05
+        ],
+        [
+          0.0,
+          0.7,
+          0.2,
+          0.1,
+          0.0
+        ]
+      ],
+      "source": "dev",
+      "n": null,
+      "note": "P(number of callees = 0..4) for a calling endpoint at depth 0 (BFF), 1, 2"
+    },
+    "error_rates": {
+      "bff": {
+        "4xx": {
+          "value": 0.0035,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "5xx": {
+          "value": 0.0004,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "err": {
+          "value": 0.0002,
+          "source": "dev",
+          "n": null,
+          "note": null
+        }
+      },
+      "service": {
+        "4xx": {
+          "value": 0.0035,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "5xx": {
+          "value": 0.0003,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "err": {
+          "value": 0.00045,
+          "source": "dev",
+          "n": null,
+          "note": null
+        }
+      },
+      "external": {
+        "4xx": {
+          "value": 0.006,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "5xx": {
+          "value": 0.002,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "err": {
+          "value": 0.001,
+          "source": "dev",
+          "n": null,
+          "note": null
+        }
+      }
+    },
+    "error_shift": {
+      "degraded": {
+        "value": {
+          "ok": 0.5,
+          "4xx": 0.0,
+          "5xx": 0.36,
+          "err": 0.14
+        },
+        "source": "dev",
+        "n": null,
+        "note": "a DEGRADED endpoint fails this share of its requests during the incident (mixture on top of the nominal classes); ok = 1 - share"
+      },
+      "failed": {
+        "value": {
+          "ok": 0.05,
+          "4xx": 0.0,
+          "5xx": 0.7,
+          "err": 0.25
+        },
+        "source": "dev",
+        "n": null,
+        "note": "class distribution under FAILED"
+      },
+      "pool_exhausted": {
+        "value": {
+          "ok": 0.6,
+          "4xx": 0.0,
+          "5xx": 0.35,
+          "err": 0.05
+        },
+        "source": "dev",
+        "n": null,
+        "note": "an EXHAUSTED pool fails this share of requests (503-like); ok = 1 - share"
+      }
+    },
+    "retry": {
+      "p_retry_5xx": {
+        "value": 0.6,
+        "source": "dev",
+        "n": null,
+        "note": "probability a retry-eligible failure is actually retried"
+      },
+      "mean_retries": {
+        "value": 0.02,
+        "source": "dev",
+        "n": null,
+        "note": null
+      }
+    },
+    "vocab_size": {
+      "value": 1800,
+      "source": "dev",
+      "n": null,
+      "note": "distinct operations in the reference corpus"
+    },
+    "async_gap_quantiles": {
+      "p50": {
+        "value": 5.1,
+        "source": "dev",
+        "n": null,
+        "note": "seconds"
+      },
+      "p90": {
+        "value": 9.1,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "p95": {
+        "value": 9.6,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "p99": {
+        "value": 9.9,
+        "source": "dev",
+        "n": null,
+        "note": null
+      }
+    },
+    "daily_profile": {
+      "value": [
+        0.25,
+        0.2,
+        0.18,
+        0.17,
+        0.18,
+        0.25,
+        0.45,
+        0.7,
+        0.95,
+        1.1,
+        1.2,
+        1.25,
+        1.2,
+        1.2,
+        1.25,
+        1.3,
+        1.3,
+        1.25,
+        1.15,
+        1.05,
+        0.9,
+        0.7,
+        0.5,
+        0.35
+      ],
+      "source": "dev",
+      "n": null,
+      "note": "hourly multipliers, mean ~0.83"
+    },
+    "weekday": {
+      "value": [
+        1.0,
+        1.05,
+        1.05,
+        1.05,
+        1.0,
+        0.75,
+        0.7
+      ],
+      "source": "dev",
+      "n": null,
+      "note": "Mon..Sun"
+    },
+    "session": {
+      "inactivity_gap_min": {
+        "value": 30,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "step_gap_quantiles": {
+        "p50": {
+          "value": 6.0,
+          "source": "dev",
+          "n": null,
+          "note": "seconds between journey steps"
+        },
+        "p90": {
+          "value": 40.0,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "p95": {
+          "value": 90.0,
+          "source": "dev",
+          "n": null,
+          "note": null
+        },
+        "p99": {
+          "value": 400.0,
+          "source": "dev",
+          "n": null,
+          "note": null
+        }
+      },
+      "steps_pmf": {
+        "value": [
+          0.4,
+          0.3,
+          0.2,
+          0.1
+        ],
+        "source": "dev",
+        "n": null,
+        "note": "P(journey length = 1..4) when a scenario is truncated by abandonment"
+      }
+    },
+    "records_per_request": {
+      "access": {
+        "value": 1.0,
+        "source": "dev",
+        "n": null,
+        "note": "per hop attempt"
+      },
+      "app_ok": {
+        "value": 0.2,
+        "source": "dev",
+        "n": null,
+        "note": "app lines per healthy hop (error-gated sink)"
+      },
+      "app_err": {
+        "value": 3.0,
+        "source": "dev",
+        "n": null,
+        "note": "app lines per failing hop"
+      },
+      "audit": {
+        "value": 1.0,
+        "source": "dev",
+        "n": null,
+        "note": "per consumer response"
+      }
+    },
+    "split": {
+      "rate": {
+        "value": 0.12,
+        "source": "dev",
+        "n": null,
+        "note": "share of app/audit lines longer than the cut"
+      },
+      "parts_pmf": {
+        "value": [
+          0.0,
+          0.0,
+          0.7,
+          0.25,
+          0.05
+        ],
+        "source": "dev",
+        "n": null,
+        "note": "P(total_parts = 1..5) for split lines"
+      },
+      "key_part_pmf": {
+        "value": [
+          0.2,
+          0.7,
+          0.1
+        ],
+        "source": "dev",
+        "n": null,
+        "note": "which part (1..3) carries the audit keys"
+      },
+      "cut_chars": {
+        "value": 4096,
+        "source": "dev",
+        "n": null,
+        "note": null
+      }
+    },
+    "unattributed_fraction": {
+      "value": 0.48,
+      "source": "dev",
+      "n": null,
+      "note": "share of records attributable to no actor"
+    },
+    "identity_level_mix": {
+      "session": {
+        "value": 0.38,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "device": {
+        "value": 0.02,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "user": {
+        "value": 0.12,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "ip": {
+        "value": 0.0,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "none": {
+        "value": 0.48,
+        "source": "dev",
+        "n": null,
+        "note": null
+      }
+    },
+    "client": {
+      "error_rate": {
+        "value": 0.003,
+        "source": "dev",
+        "n": null,
+        "note": "client-side errors per journey step"
+      },
+      "txn_sampling": {
+        "value": 0.3,
+        "source": "dev",
+        "n": null,
+        "note": "performance-span sampling rate"
+      },
+      "auto_captured_share": {
+        "value": 0.3,
+        "source": "dev",
+        "n": null,
+        "note": "share of client errors lacking request/device ids"
+      },
+      "net_flaky_share": {
+        "value": 0.05,
+        "source": "dev",
+        "n": null,
+        "note": "share of sessions on a flaky network"
+      },
+      "auth_expired_share": {
+        "value": 0.03,
+        "source": "dev",
+        "n": null,
+        "note": "share of sessions with an expired credential"
+      },
+      "logged_in_share": {
+        "value": 0.55,
+        "source": "dev",
+        "n": null,
+        "note": "share of sessions presenting a credential"
+      }
+    },
+    "cart_fallback_rate": {
+      "value": 0.04,
+      "source": "dev",
+      "n": null,
+      "note": "audit lines whose session id is silently the cart id"
+    },
+    "clock_skew_ms": {
+      "server_sd": {
+        "value": 20.0,
+        "source": "dev",
+        "n": null,
+        "note": null
+      },
+      "browser_sd": {
+        "value": 80.0,
+        "source": "dev",
+        "n": null,
+        "note": null
+      }
+    },
+    "health_check_period_s": {
+      "value": 10.0,
+      "source": "dev",
+      "n": null,
+      "note": null
+    },
+    "pods_per_service": {
+      "value": [
+        0.0,
+        0.2,
+        0.5,
+        0.3
+      ],
+      "source": "dev",
+      "n": null,
+      "note": "P(pods = 1..4)"
+    },
+    "state_dynamics": {
+      "load_persist": {
+        "value": 0.9,
+        "source": "dev",
+        "n": null,
+        "note": "P(load unchanged per tick)"
+      },
+      "pool_tight_given_high": {
+        "value": 0.02,
+        "source": "dev",
+        "n": null,
+        "note": "per-tick hazard FREE->TIGHT under HIGH load"
+      },
+      "pool_exhausted_given_high": {
+        "value": 0.01,
+        "source": "dev",
+        "n": null,
+        "note": "per-tick hazard TIGHT->EXHAUSTED under HIGH load"
+      },
+      "cache_cold_given_high": {
+        "value": 0.003,
+        "source": "dev",
+        "n": null,
+        "note": "per-tick hazard WARM->COLD under HIGH load"
+      },
+      "cache_persist_cold": {
+        "value": 0.97,
+        "source": "dev",
+        "n": null,
+        "note": "P(stays COLD per tick)"
+      },
+      "health_degraded_given_exhausted": {
+        "value": 0.05,
+        "source": "dev",
+        "n": null,
+        "note": "per-tick hazard HEALTHY->DEGRADED when the pool is EXHAUSTED"
+      },
+      "health_degraded_base": {
+        "value": 0.0005,
+        "source": "dev",
+        "n": null,
+        "note": "per-tick hazard HEALTHY->DEGRADED otherwise"
+      },
+      "health_failed_given_degraded": {
+        "value": 0.01,
+        "source": "dev",
+        "n": null,
+        "note": "per-tick hazard DEGRADED->FAILED"
+      },
+      "health_recover": {
+        "value": 0.02,
+        "source": "dev",
+        "n": null,
+        "note": "per-tick recovery hazard toward HEALTHY"
+      },
+      "pool_recover": {
+        "value": 0.05,
+        "source": "dev",
+        "n": null,
+        "note": "per-tick recovery hazard toward FREE"
+      }
+    },
+    "bytes_per_record": {
+      "vl": {
+        "value": 420.0,
+        "source": "dev",
+        "n": null,
+        "note": "uncompressed JSON bytes"
+      },
+      "sentry": {
+        "value": 1900.0,
+        "source": "dev",
+        "n": null,
+        "note": null
+      }
+    },
+    "gzip_ratio": {
+      "value": 0.22,
+      "source": "dev",
+      "n": null,
+      "note": "compressed / uncompressed"
+    },
+    "background": {
+      "app_lines_per_service_s": {
+        "value": 0.05,
+        "source": "dev",
+        "n": null,
+        "note": "keyless background app lines per service per second (unattributable machinery)"
+      }
+    }
+  }
+}

@@ -1,0 +1,67 @@
+# trace-bench named instance `xs` — the test fixture rung.
+# 3 services x 3 endpoints behind a 4-endpoint BFF, 2 scenarios, one simulated
+# hour. Generates in seconds; every acceptance test runs on it.
+schema_version: tracebench/config@1
+name: xs
+rung: local
+
+counts:
+  clients: 20
+  services: 3
+  endpoints_per_service: 3
+  bff_endpoints: 4
+  scenarios: 2
+
+scenarios:
+  - name: browse
+    steps: 2
+    weight: 3.0
+    repertoire: {client: [ok, err], bff: [ok, 4xx, 5xx, err, slow]}
+    retry: {max_retries: 1, retry_on: [5xx, err]}
+    fatal_error: true
+    terminal_failure: true
+  - name: purchase
+    steps: 4
+    weight: 1.0
+    repertoire: {client: [ok, err], bff: [ok, 4xx, 5xx, err, slow]}
+    retry: {max_retries: 2, retry_on: [5xx, err, slow]}
+    fatal_error: true
+    terminal_failure: true
+
+endpoints:
+  repertoire: [ok, 4xx, 5xx, err, slow]
+  retry: {max_retries: 1, retry_on: [5xx]}
+
+topology:
+  depth_pmf: [0.5, 0.35, 0.15]
+  fanout_mean: 2.0
+  external_services: 1
+  criticality_share: 0.7
+  cache_hit_share: 0.3
+
+mechanism:
+  floor: 0.05
+  sweep: [0.01, 0.02, 0.05, 0.10, 0.20, 0.50]
+  error_rate_multiplier: 3.0
+  ctxmax: true
+  mc_samples: 20000
+
+schedules:
+  faults:
+    - {component: "service:1", kind: degrade, start_s: 1200, end_s: 1800}
+    - {component: "service:2/endpoint:0", kind: crash, start_s: 2700, end_s: 3000}
+  regimes: []
+
+run:
+  seed: 0
+  seeds: [0, 1, 2, 3, 4]
+  window: {start: "2026-01-05T09:00:00Z", duration_hours: 1.0}
+  tick_s: 1
+  shard_ticks: 900
+  base_rps: 1.0
+  cap_gb: 50
+  twin: true
+
+constants: constants/realism-v1.json
+vocab: {min_count: 5}
+slow: {quantile: 0.95}

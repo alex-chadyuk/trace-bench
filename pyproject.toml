@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trace-bench"
+version = "0.1.0"
+description = "Simulated microservice trace benchmark with ground-truth causal graphs"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0,<3",
+    "pyarrow>=25.0,<26",
+    "pydantic>=2.9,<3",
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+publish = ["huggingface_hub>=0.30"]
+sid = ["gadjid>=0.1.0"]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["tracebench", "tracebench.correlate"]
+package-dir = { "" = "src" }
+
+[tool.setuptools.package-data]
+tracebench = ["wordlist.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: generates a corpus larger than the xs fixture"]
