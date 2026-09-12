@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import time
+import traceback
 from pathlib import Path
 
 from .config import ConfigError, load_instance_config
@@ -56,6 +57,13 @@ class Steps:
         try:
             out = fn()
         except Exception as e:
+            # The traceback is the whole diagnosis when this happens on an
+            # unattended box: the s rung failed at seeds 1 and 4 on 2026-09-12
+            # with only "IndexError: index 2872 is out of bounds for axis 0 with
+            # size 2839" in the log, and the location had to be re-derived from
+            # the array size. Print it before the step record.
+            for line in traceback.format_exc().rstrip().splitlines():
+                log({"event": "pipeline_traceback", "step": step, "corpus": corpus, "line": line})
             self._record(step, corpus, "failed", t0, error=f"{type(e).__name__}: {e}")
             raise
         self._record(step, corpus, "ok", t0)

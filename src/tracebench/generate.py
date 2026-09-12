@@ -29,7 +29,7 @@ from .constants import (
     CASES_JSON, COMPLETE_MARKER, ESTIMATE_JSON, FAULTS_JSON, LABELS_DIR, RUN_DIR, VARIANT_LATENT, VARIANT_TWIN,
 )
 from .emit import Emitter
-from .engine import Engine
+from .engine import Engine, SpillExceeded
 from .estimate import alphabet_estimate, expected_invocations
 from .graphs import write_graph_artifacts
 from .instantiate import instantiate_from_paths, load_instantiation, write_instantiation
@@ -94,13 +94,40 @@ def _shard_bounds(cfg):
     return bounds
 
 
+SPILL_RETRY_MARGIN = 600     # ticks added beyond what the failed attempt asked for
+SPILL_RETRY_MAX = 4
+
+
 def run_one_shard(inst, corpus_dir, variant, seed, shard, t0, t1, checkpoint, forcings, spill_ticks):
     slots = Slots.build(inst.topo)
     n_total = _n_ticks(inst.cfg)
-    latents, _ = simulate_latents(inst, seed, slots, checkpoint, t0, min(t1 + spill_ticks, n_total + spill_ticks), forcings)
-    engine = Engine(inst, seed, slots, forcings)
-    res = engine.run_shard(shard, t0, t1, latents)
-    if res.spill_ticks > spill_ticks:
+    # `spill_allowance` is a tail heuristic, not a bound: a long enough journey
+    # outruns it (D-TB-16). When that happens the engine says how many ticks it
+    # needed, and the shard is re-simulated and re-run at that size. This is
+    # byte-identical to having started with the larger allowance, because the
+    # latent uniforms are keyed by the absolute tick and the chain advances from
+    # `checkpoint` — a longer slice holds the same values at every tick the
+    # shorter one held. The retry costs one shard's work.
+    spill = spill_ticks
+    for attempt in range(SPILL_RETRY_MAX):
+        latents, _ = simulate_latents(inst, seed, slots, checkpoint, t0, min(t1 + spill, n_total + spill), forcings)
+        engine = Engine(inst, seed, slots, forcings)
+        try:
+            res = engine.run_shard(shard, t0, t1, latents)
+        except SpillExceeded as e:
+            needed = e.needed_ticks - (t1 - t0) + SPILL_RETRY_MARGIN
+            if attempt == SPILL_RETRY_MAX - 1 or needed <= spill:
+                raise RuntimeError(
+                    f"shard {shard}: a journey spilled past the latent slice and {SPILL_RETRY_MAX} "
+                    f"attempts did not suffice (held {e.held_ticks} ticks, needed {e.needed_ticks}); "
+                    f"raise the spill allowance") from e
+            log({"event": "spill_retry", "shard": shard, "attempt": attempt + 1,
+                 "held_ticks": e.held_ticks, "needed_ticks": e.needed_ticks,
+                 "spill_ticks": spill, "next_spill_ticks": needed})
+            spill = needed
+            continue
+        break
+    if res.spill_ticks > spill:
         raise RuntimeError(f"shard {shard}: journeys spilled {res.spill_ticks} ticks past the slice; raise the spill allowance")
     emitter = Emitter(inst, seed, slots, variant)
     records, oracle = emitter.emit_shard(res)
