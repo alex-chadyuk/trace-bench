@@ -6,5 +6,8 @@ pyarrow>=25.0,<26
 pydantic>=2.9,<3
 pyyaml>=6.0,<7
 # Optional extras (install with `pip install -e ".[publish,sid]"`):
-#   huggingface_hub  - the publish command only
+#   huggingface_hub  - `publish upload` / `publish release` and `pipeline --upload`
+#                      only (>=0.30 for the resumable large-folder upload; an
+#                      unattended generation job installs the publish extra and
+#                      authenticates from the HF_TOKEN environment variable)
 #   gadjid           - SID / AID on the observable twin's DAG

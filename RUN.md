@@ -11,9 +11,13 @@ the specification; this file records the implementation's departures from it.
   `requirements.txt`; the manifest of every corpus records the exact numpy and
   pyarrow versions in force, and `numpy` minor is asserted at load because
   Generator bit streams are only stable within a minor version.
-- Rungs xs–l generate locally (CPU only). The top rung (xl) generates in the
-  cloud under the lab's private execution configuration, which is not part of
-  this repository.
+- Every shipped rung generates in the cloud under the lab's private execution
+  configuration, which is not part of this repository: one job per (rung, seed)
+  for s/m/l/xl and one job for all five xs seeds, each running
+  `python -m tracebench.pipeline` (generate the latent instance and its twin,
+  verify both, upload both). Rungs xs–l also generate locally on CPU, which is
+  how the xs checksum fixture is frozen and how a change is checked before a
+  cloud run.
 
 ## Deviations vs the PRD (D-TB-n)
 
@@ -149,6 +153,44 @@ the specification; this file records the implementation's departures from it.
     on the callees a calling hop actually invokes and reports the topology's
     edge count beside it.
 
+- **D-TB-14 — publishing splits into an unversioned `upload` and a `release`
+  that tags (2026-09-12).** `publish` was one command that uploaded N corpora
+  and created the version tag in a single shot. It could not accumulate the 50
+  corpora of a release from independent jobs, it uploaded with a non-resumable
+  whole-folder call, and it would have shipped `artifacts.json` (which names
+  the private object store). It is now two subcommands:
+  - `publish upload` puts complete corpora on the dataset host's default
+    branch at `instances/<instance>/<variant>/seed=<k>`, with no release
+    metadata and no tag. It refuses a corpus that is not complete or does not
+    verify against its manifest, refuses a remote path that already exists
+    unless `--replace` is given, and post-checks that every uploaded corpus has
+    a remote `manifest.json`. This is what an unattended generation job runs,
+    so 21 independent jobs can fill one release.
+  - `publish release --version vX.Y.Z` is the single-writer step: it refuses an
+    existing tag (PRD scenario 14, unchanged), downloads every remote
+    `manifest.json`, checks that each corpus is `COMPLETE` and that every file
+    it lists is present on the host with the same size and — where the host
+    exposes a per-file hash — the same sha256, then writes the card, the
+    licence and `release.json` and tags the repository. A host that stores
+    files without exposing a hash degrades the check to size only, and
+    `release.json` records how many files were hash-verified.
+  - *Uploads stage hard links.* The host library's resumable upload call takes
+    no in-repository path, so each corpus is hard-linked into
+    `<stage>/instances/<instance>/<variant>/seed=<k>` and the stage is what is
+    uploaded: the repository layout without copying a byte. `run/` and
+    `artifacts.json` are never linked in, and the stage is removed only after
+    the post-check passes (a failed upload keeps it, because it carries the
+    library's own resume state). The stage must sit outside every corpus —
+    a stage inside one would be hashed into it — and outside the directory an
+    execution environment copies afterwards.
+  - *The dataset is public from creation* and its card carries
+    `viewer: false`: a corpus is a tree of gzipped JSON lines and parquet files
+    with several schemas, not one table.
+  - *Corpora are versioned by the tool version, releases are dataset tags.*
+    Every `manifest.json` names the tool version that produced it, so a
+    corpus's identity does not depend on which release names it; a release is a
+    tag over corpora already uploaded.
+
 ## Implementation notes (not deviations)
 
 - **Every operation lies on a journey.** The topology sampler attaches an
@@ -213,6 +255,34 @@ the specification; this file records the implementation's departures from it.
   operation names only. It also caught one emitted `log_source` value that
   coincided with a real module name; the value was renamed. The scan compiles
   the list into a prefix-trie regex (about 10 s per corpus).
+- **One unattended job = one rung's `pipeline` invocation.** `tracebench.pipeline`
+  runs generate (latent, then twin) → verify → verify → one upload per job,
+  prints one `pipeline_step` line per step (step, corpus, status, seconds), and
+  stops at the first failure with later steps skipped, so whatever was already
+  generated stays on disk for an execution environment that copies the output
+  directory afterwards. Its exit status is 0 only when every step succeeded; a
+  malformed configuration or a refused size estimate exits 3, a failed step
+  exits 1. The job's own record is written to `<out>/pipeline-<rung>/run/`,
+  outside every corpus. `--skip-existing` skips *generating* a corpus already
+  marked `COMPLETE` (a relaunch on a box that still holds the output); such a
+  corpus is still verified before it is uploaded, because verification against
+  the private denylist is part of a corpus being called verified. Nothing
+  private is compiled into the module: the denylist path, the staging directory
+  and the dataset repository are arguments.
+- **The xs checksum fixture** (`tests/fixtures/xs-checksums.json`, frozen
+  2026-09-12 at tool version 0.2.0) pins the per-file sha256 of
+  `xs/{latent,twin}/seed=0` — 70 and 74 files — generated from the shipped
+  `configs/instances/xs.yaml`. The configuration path matters: `config_hash`
+  covers the `constants` field as written in the file, so a rewritten copy of
+  the config hashes differently, and the fixture is frozen from the shipped one
+  with `python -m tracebench.manifest freeze`. `tests/test_byte_identity.py`
+  regenerates the pair and compares; with
+  `TRACEBENCH_XS_MANIFEST_DIR=<dir of pulled manifest.json files>` it compares
+  manifests produced on another machine instead, which is the cross-machine
+  half of PRD scenario 12. The freeze ran with `--workers 3` and the test
+  regenerates with one worker, so the pair also pins sharding independence. A
+  tool-version bump changes `instantiation.json` (it records the version) and
+  therefore requires a re-freeze.
 - **Local corpora belong outside synced folders**: a 26 GB rung × 5 seeds ×
   2 variants is not something to put under Dropbox; pass `--out` accordingly.
 
@@ -256,6 +326,15 @@ the specification; this file records the implementation's departures from it.
   existing version (stubbed host), family sampling with a disjoint split.
   `pytest tests/ -m "not slow"` is the gate; the slow xl alphabet check runs on
   demand.
+- Publishing (2026-09-12): the upload path (hard-linked staging tree without
+  `run/` or `artifacts.json`, duplicate refusal, `--replace`, the remote
+  manifest post-check), the release path (remote verification against every
+  manifest, a tampered size or hash refused, an existing tag refused, the card
+  and index) and the size-only fallback when the host exposes no per-file hash
+  are gated by `tests/test_manifest.py` against an in-memory dataset host;
+  the per-rung job by `tests/test_pipeline.py` (step events, a failed
+  verification stopping the job before any upload, exit statuses); byte
+  identity against the frozen fixture by `tests/test_byte_identity.py`.
 - M5 streaming (2026-09-10): the per-shard correlator reproduces the
   whole-corpus report on xs field for field (parent-link P/R/F1, attribution
   histograms, session recovery, orphans, normaliser counts).
@@ -268,3 +347,4 @@ the specification; this file records the implementation's departures from it.
 | 2026-09-11 | s | latent | 0 | `python -m tracebench.generate --config configs/instances/s.yaml --seed 0 --out ~/tracebench-corpora --workers 3` | 0.1.0 (uncommitted tree) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 96 shards, 6.0 GB, 50 min wall / 86 CPU-min, driver RSS 5.5 GB; parent-link F1 0.9994, unattributed 0.56 %; alphabet realized (train) 322, vocab 326, 3.86 M view rows; orientation violations start 0.05 % / end 1.4 %; `verify` manifest ok, names ok **including the private denylist**; realism 17/20 (same three misses as above). Pushed to the lab's private object store under `corpora/s/latent/seed=0`; also xs latent + twin (seed 0, same date, verify + denylist clean). Not frozen, not published. **Superseded 2026-09-11 by the D-TB-13 rows below**: removed from the object store, local copies kept aside as `seed=0.v01-superseded-26-09-11`. |
 | 2026-09-11 | xs | latent + twin | 0 | `python -m tracebench.generate --config configs/instances/xs.yaml --seed 0 --out ~/tracebench-corpora [--twin]` | 0.1.0 (uncommitted, D-TB-13) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 4 shards each, 29 MB each, 55 s for both variants; realism 18/20 (request depth passes, TV 0.004, invoked fan-out 1.95; misses: external p95 −10 %, step-gap p50 +38 %; the external p95 is sampling noise in a steep tail — 1.1 resampling SE on 4,578 spans, the constant inside the item's 90 % bootstrap interval [3.77, 4.92] s, and external p50–p99 all pass at s); `check_mechanism --max-edges 40 --non-edges 8` on the latent variant: 39/40 sampled edges within 0.03 (the miss is the SLOW-mediated `F:9 → A:6:0` at 0.031, the D-TB-9 residual channel), non-edges 8/8 with a largest residual of 0.0012; `verify` manifest, names and private denylist clean. |
 | 2026-09-11 | s | latent | 0 | `python -m tracebench.generate --config configs/instances/s.yaml --seed 0 --out ~/tracebench-corpora --workers 3` | 0.1.0 (uncommitted, D-TB-13) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 96 shards, 3.5 GB (estimate 4.2), 27.6 min wall with 3 workers; correlator parent-link F1 0.9991, unattributed 0.88 %, session Jaccard 1.00, 434,181 sessions, 3.83 M view rows; alphabet realized (train) 322 of 323 potential, vocab 323; realism 18/20 (request depth passes, TV 0.003; misses: BFF p95 +16 %, step-gap p50 +29 %); `verify` manifest, names and private denylist clean. Not frozen, not published. |
+| 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.0 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 4 shards per variant, 49 s for the whole job (generate 20.6 s + 17.0 s, verify 5.4 s + 5.7 s); `verify` manifest, names and private denylist clean on both variants (200k records scanned each). **Freeze source of `tests/fixtures/xs-checksums.json`** (70 files latent, 74 twin, config_hash `1656f43b4b6e5deb690a31574bd98e55`); regeneration with one worker reproduces every checksum. Not uploaded: the published xs corpora come from the cloud job over all five seeds. |
