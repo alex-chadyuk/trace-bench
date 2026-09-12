@@ -5,8 +5,9 @@ slice are generated atomically: their journeys may spill past the slice, so
 the worker holds the latent trajectory for [t0, t1 + spill). Sessions advance
 in lockstep over journey steps and client retry attempts; at every
 (step, attempt) the due requests are grouped by BFF endpoint and each group's
-request trees are evaluated vectorised — invocation top-down (a WARM cache
-skips a cached call), outcomes and durations bottom-up (callee finals reach
+request trees are evaluated vectorised — invocation top-down (a caller calls
+a callee on the edge's share of requests, and a WARM cache skips a cached
+call), outcomes and durations bottom-up (callee finals reach
 the caller through the mechanism's worst-of aggregator; a hop's total time is
 its own time plus the totals of the callees it invoked; SLOW is total > the
 op's threshold). Every draw is a counter-keyed uniform (hashing.py), so the
@@ -32,7 +33,7 @@ from .mechanism import (
 from .rng import shard_generator
 
 # hop draw kinds
-H_CLASS, H_OWN, H_HIT, H_RHO, H_RETRY, H_POD, H_STATUS = 0, 1, 2, 3, 4, 5, 6
+H_CLASS, H_OWN, H_HIT, H_RHO, H_RETRY, H_POD, H_STATUS, H_CALL = 0, 1, 2, 3, 4, 5, 6, 7
 # session / request draw kinds
 S_SCEN, S_NET, S_AUTH, S_LOGIN, S_MS, S_GAP, S_BACKOFF = 0, 1, 2, 3, 4, 5, 6
 C_ERR, C_TAG, C_TXN = 0, 1, 2
@@ -301,14 +302,18 @@ class Engine:
                 u = e.caller
                 if u not in invoked:
                     continue
-                miss = np.ones(n, bool)
+                # v is invoked through e: u is invoked, u calls v on this request,
+                # and a cache does not answer the call
+                calls = np.ones(n, bool)
+                if e.p_call < 1.0:
+                    calls = uniforms(seed, D_HOP, req_gid, e.index, H_CALL) < e.p_call
                 if e.cached:
                     cache_state = self._state_at(latents, tick, u)[2]
                     u_hit = uniforms(seed, D_HOP, req_gid, e.index, H_HIT)
-                    miss = ~((cache_state == 0) & (u_hit < e.p_hit))
-                via = invoked[u] & miss & ~inv
+                    calls &= ~((cache_state == 0) & (u_hit < e.p_hit))
+                via = invoked[u] & calls & ~inv
                 parent[via] = u
-                inv |= invoked[u] & miss
+                inv |= invoked[u] & calls
             if v in self.force_invoke:
                 if self.force_invoke[v]:
                     # present: invoked in every request of this tree (the held

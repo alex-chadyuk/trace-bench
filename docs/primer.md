@@ -76,7 +76,7 @@ endpoints strictly deeper than $d$, and externals sit below everyone. Two
 consequences follow immediately: every request tree is acyclic, and every
 backend endpoint has one well-defined depth.
 
-Each call edge carries four sampled attributes that the mechanism will use:
+Each call edge carries five sampled attributes that the mechanism will use:
 
 | Attribute | Meaning |
 |---|---|
@@ -84,6 +84,7 @@ Each call edge carries four sampled attributes that the mechanism will use:
 | `rho` | probability that a critical callee failure actually reaches the caller's outcome |
 | `cached` | the call is fronted by a cache; a warm cache skips it |
 | `p_hit` | cache-hit probability while the cache is warm |
+| `p_call` | share of the caller's requests on which this callee is called at all |
 
 Fan-out is an instance *target* (a truncated Poisson with mean `fanout_mean`),
 not an inherited constant: the real reference system that the realism constants
@@ -91,11 +92,44 @@ were fitted on is star-shaped (96 percent of root spans call nothing), and a
 benchmark of single-hop requests would be uninteresting. The realism report
 states the deviation instead of hiding it (§13).
 
+**How deep a request goes is a property of the edges, not of the tree.** An
+instance also configures a *depth profile* `depth_pmf`: the share of requests
+whose deepest backend-service layer is 1, 2, and so on, counting the BFF as
+layer 0 and treating an external endpoint as a leaf that sets no depth. If every
+callee were called on every request, a request would traverse its whole
+reachable subtree and nearly all requests would bottom out at the deepest layer
+— which is what the first implementation did, missing the configured profile
+badly. Each edge therefore carries `p_call`, and a callee is invoked exactly
+when three things hold: its caller was invoked, the edge's call draw for this
+request falls under `p_call`, and no warm cache answers the call (D-TB-13).
+
+The probabilities are **calibrated at instantiation**. The parameter for each
+layer is a stop probability $s_d$: an invoked endpoint at layer $d$ calls
+nothing deeper with probability $s_d$, so an endpoint with $k$ callees gives
+each of its edges $p = 1 - s_d^{1/k}$, which stops a fat endpoint from
+continuing more often than a thin one merely for having more edges. A request
+that has reached layer $d$ stops there when every one of its invoked endpoints
+at that layer stops, which fixes $s_d$ in closed form from the profile. Fan-out,
+cache hits and the attachment rule below make the number of invoked endpoints
+per layer uneven, so a topology-only Monte Carlo then refits $s_d$ until the
+realised profile is within total variation 0.02 of the configured one. The
+result is recorded in `instantiation.json` under `topology.calibration`, and
+every probability is floored at 0.02 so that no edge is exercised too rarely to
+be measured.
+
 Two rules guarantee that **every operation lies on some journey**: an endpoint
 no sampled call reaches is attached to a caller that is itself reachable from
 the BFF, and scenarios (next) draw their BFF endpoints first from those no
 earlier scenario visits. Without both, a third of the operations at the larger
-rungs carried no traffic and the realized alphabet fell short.
+rungs carried no traffic and the realized alphabet fell short. That attachment
+rule and the call probabilities interact, and the interaction is worth stating.
+At the larger rungs most layer-1 endpoints are reached by no sampled BFF call,
+so they are attached straight to BFF endpoints — about forty per endpoint at the
+top rung. A BFF endpoint makes its *sampled* layer-1 calls and its external
+calls on every request, so every request still reaches the first service layer,
+while the $m$ endpoints attached to it only for reachability share one call per
+request between them, $1/m$ each. Calling all of them every time would make a
+top-rung request forty hops wide and put its depth profile out of reach.
 
 ### 2.3 Scenarios, sessions, requests, hops
 
@@ -108,10 +142,12 @@ is fatal for the journey.
 A **session** is one client executing one scenario: it arrives at a random time,
 performs step 0, waits a sampled gap, performs step 1, and so on, until it either
 finishes or a step fails terminally. Each step is one **request**: the client
-calls the BFF endpoint, which calls its callees, which call theirs. The request
-therefore traverses a **request tree**, a subtree of the topology rooted at the
-BFF endpoint. Every node visit in that tree is a **hop**; a retried hop is a
-second **attempt** of the same op.
+calls the BFF endpoint, which calls some of its callees, which call some of
+theirs. The request therefore traverses a **request tree**, a *random* subtree
+of the topology rooted at the BFF endpoint: which callees it contains is drawn
+per request from the call probabilities and caches of §2.2, so two requests to
+the same endpoint need not visit the same operations. Every node visit in that
+tree is a **hop**; a retried hop is a second **attempt** of the same op.
 
 ### 2.4 Outcomes and the alphabet
 
@@ -128,7 +164,8 @@ per-operation threshold (the configured quantile of the op's nominal duration).
 SLOW exists because latency-only faults would otherwise be invisible to a method
 that sees only outcome tokens (deviation D-TB-1 in `RUN.md`). On the mechanism
 side a sixth value, `absent`, records that the op was not invoked in this
-request at all; it is a state value but never a token.
+request at all — not called, or answered by a cache; it is a state value but
+never a token.
 
 The central object of the whole benchmark is the **event type**, or token:
 
@@ -146,20 +183,23 @@ graph over the same alphabet the model reasons in" means concretely.
 Five **named instances** form a size ladder. Each is a checked-in configuration
 file, so citing one names a file.
 
-| Rung | Services x endpoints (+ BFF) | Expected realized tokens |
-|---|---|---|
-| xs | 3 x 3 (+4) | 45 |
-| s | 10 x 5 (+8) | 185 (realized 322) |
-| m | 50 x 10 (+20) | 1,548 |
-| l | 150 x 10 (+30) | 4,531 |
-| xl | 350 x 12 (+60) | 12,554 |
+| Rung | Services x endpoints (+ BFF) | Window | Expected realized tokens |
+|---|---|---|---|
+| xs | 3 x 3 (+4) | 1 hour | 44 |
+| s | 10 x 5 (+8) | 1 day | 188 (realized 322) |
+| m | 50 x 10 (+20) | 2 days | 1,573 |
+| l | 150 x 10 (+30) | 3 days | 4,325 |
+| xl | 350 x 12 (+60) | 5 days | 10,750 |
 
 The top rung is deliberately sized past the largest synthetic alphabet the
 target method has been evaluated on (8,000), so the rung where a method breaks
 lies inside the suite. Every named instance ships at least five seeds and an
-observable twin (§9). Windows are one simulated day at a few requests per
-second; the estimator that sizes them is calibrated against the realized `s`
-run (6 GB, 47 minutes on a laptop).
+observable twin (§9). Windows run from one hour to five days at three to five
+requests per second, and the estimator that sizes them is calibrated against
+the realized `s` run (3.5 GB, 28 minutes on a laptop with three workers).
+Generation cost is dominated by emission and therefore scales with hops, so
+once the call probabilities of §2.2 cut a request to about four and a half hops
+the longer windows became affordable.
 
 ---
 
@@ -193,6 +233,10 @@ with $R$ permitted retries:
 | `I:v` | was $v$ invoked in this request? | present, absent |
 | `A:v:k` | outcome of attempt $k$ of $v$ | the six T values |
 | `F:v` | final outcome of $v$ (last non-absent attempt) | the six T values |
+
+`I:v` is where the call probability of §2.2 enters the mechanism: $v$ is present
+when one of its callers is present, that caller's call draw for the edge falls
+under `p_call`, and no warm cache answers the call.
 
 For a BFF endpoint the attempt variable is indexed by journey context,
 `T:bff:c:j:k` for scenario $c$, step $j$, client retry $k$, with its own
@@ -304,10 +348,12 @@ sometimes an err, occasionally nothing.
 probability $p_{\text{slow}}$ that the hop's total duration exceeds its
 threshold, a Monte Carlo estimate from the latency model under the given
 health, pool, cache and callee context. Finally the whole vector is scaled by
-the probability of being present, with the remainder on absent. A callee
-fronted by a warm cache is skipped with probability `p_hit`, so **occurrence is
-itself a dependence**: a cold cache makes a call present that a warm cache
-would have removed.
+the probability of being present, with the remainder on absent. A callee is
+called at all on a share $p$ of its caller's requests, and a cached call is
+answered by a warm cache with probability $h$, so a present caller leaves the
+callee invoked with probability $p(1 - h)$. That product *is* the strength of
+the invocation edge, and a cold cache raises it to $p$: **occurrence is itself a
+dependence**, carried by the caller's presence and by the cache latent.
 
 ### 4.3 Worked example: the worst-of aggregator
 
@@ -700,7 +746,8 @@ latent confounding** as a published number.
 
 Every random draw in the engine is a **pure function of identifiers**: the run
 seed, a draw domain, and up to four integer coordinates such as (request id, op,
-draw kind, attempt). The mixer is splitmix64 and the result is a uniform in
+draw kind, attempt), or (request id, edge index, draw kind) for the per-edge
+call and cache draws. The mixer is splitmix64 and the result is a uniform in
 $[0, 1)$. Nothing depends on call order or on realised outcomes. Three
 properties follow at once:
 
@@ -720,8 +767,10 @@ Because observables never feed tick latents (§3.3), the generator first advance
 the latent trajectory sequentially over the whole window and records its state
 at every shard boundary. Workers then simulate shards in parallel: sessions
 arriving in a shard are generated atomically (their journeys may spill past the
-slice), requests are grouped by BFF endpoint and evaluated vectorised, invocation
-top-down, outcomes and durations bottom-up.
+slice), requests are grouped by BFF endpoint and evaluated vectorised:
+invocation top-down — a callee is invoked when its caller is, its call draw
+falls under the edge's call probability, and no warm cache answers the call —
+then outcomes and durations bottom-up.
 
 ### 10.3 One hook, three uses
 
@@ -741,8 +790,8 @@ mechanism behind:
    non-edges must show a strength of zero within $0.05$ (the looser bound
    exists because a callee's duration varies within its class band and
    reaches the caller's slow class through a channel a categorical graph
-   cannot carry; the largest residual is a published number, $0.04$ on xs;
-   D-TB-9). This is what makes "by construction" *checkable*.
+   cannot carry; the largest residual is a published number in every corpus's
+   report; D-TB-9). This is what makes "by construction" *checkable*.
 3. **The twin**, which forces nothing but records everything.
 
 ### 10.4 Worked example: a paired fault corpus
@@ -822,7 +871,7 @@ inferred depth; genuine inversions are counted, never repaired.
 Because the oracle exists, the loss the correlation step itself introduces is a
 **measured, published quantity**: parent-link precision and recall, the
 unattributed fraction, session recovery. On the realized s run the parent-link
-F1 was $0.9994$ and $0.56$ percent of records were unattributed. These are
+F1 was $0.9991$ and $0.88$ percent of records were unattributed. These are
 reported quantities, not pass thresholds; the benchmark's purpose is to measure
 the loss, not to hit a target for it. A method sees the raw feed and the views
 only; faults, cases, the mechanism, the target and the oracle are all outside
@@ -936,29 +985,39 @@ and carry no commercial term. Real records never are.
 
 A `realism` command scores a generated corpus against the constants that
 produced it: latency quantiles per tier, leaf error rates, step gaps, depth and
-fan-out, within stated tolerances. On the s run 17 of 20 items pass. The three
-that fail are recorded, not hidden, and one is an **open designers' decision**:
-90 percent of requests reach the deepest layer against a configured depth
-profile of ${(0.5, 0.35, 0.15)}$, because a request traverses its whole
-reachable subtree and the reachability rule of §2.2 makes trees full. The fix
-on the table is a per-edge call probability
-${p = 1 - \text{stop}^{1/(f^d k)}}$ derived from the depth profile, which would
-touch the invoke tables, the engine's draws, the estimator and the twin.
+fan-out, within stated tolerances. On the s run 18 of 20 items pass, and
+**request depth is now one of the passing items**: the realised profile is
+${(0.497, 0.350, 0.153)}$ against a configured ${(0.5, 0.35, 0.15)}$, a total
+variation of 0.003. Before the call probabilities of §2.2 the same item read
+${(0.070, 0.033, 0.897)}$ — 90 percent of requests at the deepest layer, because
+a request traversed its whole reachable subtree and the reachability rule made
+trees full. Seven percent of s requests are answered without touching a backend
+at all, every call their BFF endpoint would make being a cache hit; those are
+reported beside the profile rather than folded into it, which is how the fitted
+constant is defined too. Fan-out is scored on the callees a hop actually
+invokes (2.14 against a configured 2.0), with the topology's static edge count
+reported beside it.
+
+The two items that fail are recorded, not hidden. The BFF's own time at the p95
+runs 16 percent high, because it absorbs the retry back-off of its callees; the
+session step-gap p50 runs 29 percent high, because gaps are measured between
+audited responses and so include the next request's duration.
 
 ### 13.3 Deviations
 
-`RUN.md` records twelve numbered departures from the PRD (D-TB-1 to D-TB-12).
+`RUN.md` records thirteen numbered departures from the PRD (D-TB-1 to D-TB-13).
 The ones a reader of this primer has already met: the SLOW class (1), token
 nodes (2), nominal-context strength (3), min-of-arms bidirected strength (4),
 twin as observed latents (5), both orderings and grains (6), the residual
 duration channel (9), co-occurrence support (10), explicit outcome shares for
-degraded and exhausted states (11), and cap-sized windows (12).
+degraded and exhausted states (11), rung windows and rates sized to the cap
+(12), and the per-edge call probability with its depth calibration (13).
 
 ### 13.4 Module-to-concept map
 
 | Module | Concept in this primer |
 |---|---|
-| `topology.py`, `scenarios.py` | §2 world, call topology, journeys |
+| `topology.py`, `scenarios.py` | §2 world, call topology, call probabilities, journeys |
 | `mechanism.py`, `tables.py`, `latency.py` | §3 variables, §4 tables, §5 strengths |
 | `projection.py` | §6 projection, §7 token expansion, §8 support and views |
 | `graphs.py`, `regimes.py` | writing the ground truth, one graph per regime |
@@ -1021,6 +1080,9 @@ keeps its construction independent of its results.
 - **Bidirected edge** — a projected edge marking a latent common cause of two
   tokens; strength is the weaker of its two arms. §6.2, §7.2.
 - **BFF** — the single edge tier every browser request hits first. §2.1.
+- **Call probability** — `p_call`, the share of a caller's requests on which a
+  call edge is taken; calibrated at instantiation so that request depth follows
+  the configured profile. §2.2, §4.2.
 - **Co-occurrence support** — the op pairs that can share a request tree or a
   journey; defines the scoring universe. §8.2.
 - **Common random numbers** — draws keyed by identifiers, so paired corpora
@@ -1046,6 +1108,9 @@ keeps its construction independent of its results.
   raw record. §11.1.
 - **Regime** — an interval over which the mechanism is fixed; a changepoint
   opens a new one with its own graph. §13.4.
+- **Request depth** — the deepest backend-service layer a request's invoked hops
+  reach, with the BFF at layer 0 and externals setting no depth; its
+  distribution is a configuration target. §2.2, §13.2.
 - **Rung / named instance** — one size step of the ladder, a checked-in
   configuration with at least five seeds and a twin. §2.5.
 - **Scoring target** — the latent projection at the request or session grain,

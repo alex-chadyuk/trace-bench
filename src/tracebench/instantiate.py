@@ -1,7 +1,8 @@
 """Instantiation: configuration + constants + seed -> a concrete system.
 
-`instantiate()` builds names, topology, scenarios, latency thresholds and the
-mechanism in a fixed order from the INSTANTIATE and LATENCY streams, and
+`instantiate()` builds names, topology, scenarios, call probabilities, latency
+thresholds and the mechanism in a fixed order from the INSTANTIATE and LATENCY
+streams, and
 `write_instantiation()` records everything a later, read-only derivation needs
 (`instantiation.json`, `topology/callgraph.json`, `topology/prior.json`,
 `slow-thresholds.json`). The mechanism graph itself is derived from these by
@@ -25,7 +26,7 @@ from .realism import RealismConstants, load_realism, resolve_constants_path
 from .record import canonical_hash, write_json
 from .rng import instantiation_generator, numpy_minor_version
 from .scenarios import ScenarioSet, build_scenarios
-from .topology import Topology, build_topology, callgraph_json, prior_json
+from .topology import Topology, assign_call_probabilities, build_topology, callgraph_json, prior_json
 from . import __version__
 
 
@@ -49,6 +50,7 @@ def instantiate(cfg: InstanceConfig, constants: RealismConstants, seed: int) -> 
     namer = Namer(rng)
     topo = build_topology(cfg, constants, rng, namer, sum(s.steps for s in cfg.scenarios))
     sset = build_scenarios(cfg, topo, rng)
+    assign_call_probabilities(topo, cfg, constants, sset, rng)     # request depth is weighted by BFF traffic
     latency = LatencyModel(topo, constants, cfg.slow.quantile, mc_samples=cfg.mechanism.mc_samples, cfg=cfg)
     latency.fit_thresholds(instantiation_generator(seed, Stream.LATENCY))
     mech = Mechanism(cfg, constants, topo, sset, latency, seed)

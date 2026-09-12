@@ -42,8 +42,8 @@ def expected_invocations(inst):
             p_absent = 1.0
             for e in topo.caller_edges(v):
                 pu = p.get(e.caller, 0.0)
-                miss = 1.0 - (e.p_hit if e.cached else 0.0)
-                p_absent *= 1.0 - pu * miss
+                through = e.p_call * (1.0 - (e.p_hit if e.cached else 0.0))    # called and not answered by the cache
+                p_absent *= 1.0 - pu * through
             p[v] = 1.0 - p_absent
         for v, pv in p.items():
             if v != b:

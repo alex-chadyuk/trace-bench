@@ -1,6 +1,7 @@
 """PRD scenarios 9 (realism as a measurement), 10 (generation needs no
 network) and 11 (the constants loader fails closed; it never invents values)."""
 import json
+import os
 import socket
 
 import pytest
@@ -25,12 +26,24 @@ def test_realism_report_measures_every_quantity_and_names_the_constants_version(
         assert set(i) >= {"quantity", "constant", "realised", "tolerance", "pass"}
     meta = read_json(corpus / "run" / "run_meta.json")
     assert meta["command"] == "generate"
+    # request depth follows the configured pmf (D-TB-13); fan-out is the invoked one
+    depth = next(i for i in rep["items"] if i["quantity"] == "depth_pmf")
+    assert depth["pass"], depth
+    assert depth["calibration_tv"] is not None and 0.0 <= depth["root_only_share"] < 0.10
+    fan = next(i for i in rep["items"] if i["quantity"] == "fanout_mean")
+    assert fan["realised"] > 0 and fan["static_fanout"] >= 1.0
 
 
 @pytest.mark.slow
-def test_named_instance_s_matches_its_constants():
-    """Rung s against fitted constants; runs once realism-v1.json exists."""
-    pytest.skip("requires the fitted realism-v1.json (private fitter, M6)")
+def test_named_instance_s_request_depth_matches_its_configuration():
+    """Rung s: the realism report on a generated s corpus (path in
+    TRACEBENCH_S_CORPUS) passes the request-depth item."""
+    corpus = os.environ.get("TRACEBENCH_S_CORPUS")
+    if not corpus:
+        pytest.skip("set TRACEBENCH_S_CORPUS to a generated s corpus")
+    rep = realism_report(corpus)
+    depth = next(i for i in rep["items"] if i["quantity"] == "depth_pmf")
+    assert depth["pass"], depth
 
 
 def test_generation_makes_no_network_call(monkeypatch):

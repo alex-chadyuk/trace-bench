@@ -12,6 +12,7 @@ from tracebench.graphs import write_mechanism_graphs
 from tracebench.instantiate import instantiate
 from tracebench.mechanism import tv
 from tracebench.record import read_json
+from tracebench.topology import CALL_P_MIN
 from xs_fixture import XS, xs_instantiation
 
 
@@ -85,6 +86,41 @@ def test_distributions_are_normalised_and_cache_edges_measured():
     g = inst.mechanism.graph_json(ctxmax=False)
     cache_edges = [e for e in g["edges"] if e["src"].startswith("cache:") and e["dst"].startswith("I:")]
     assert cache_edges and all(e["strength"] > 0 for e in cache_edges)
+
+
+def test_invoke_edges_carry_the_call_probability_times_the_cache_miss():
+    """At the nominal context (caches WARM, other callers absent) an invoke
+    edge caller -> callee has strength p_call x (1 - p_hit) on a cached call
+    and p_call otherwise; a cache -> invoke edge has p_call x p_hit of the
+    first cached call it fronts."""
+    inst = xs_instantiation()
+    topo, sset = inst.topo, inst.sset
+    g = inst.mechanism.graph_json(ctxmax=False)
+    call = {(e.caller, e.callee): e for e in topo.edges}
+
+    def op_of(invoke_id):
+        parts = invoke_id.split(":")
+        return sset.scenarios[int(parts[2])].steps[int(parts[3])].bff_op if parts[1] == "bff" else int(parts[1])
+
+    n_invoke = n_cache = 0
+    for rec in g["edges"]:
+        if not rec["dst"].startswith("I:") or rec["dst"].startswith("I:bff"):
+            continue
+        callee = op_of(rec["dst"])
+        if rec["src"].startswith("I:"):
+            e = call[(op_of(rec["src"]), callee)]
+            assert e.p_call >= CALL_P_MIN
+            expected = e.p_call * ((1 - e.p_hit) if e.cached else 1.0)
+            n_invoke += 1
+        elif rec["src"].startswith("cache:"):
+            svc = int(rec["src"].split(":")[1])
+            e = next(x for x in topo.caller_edges(callee) if x.cached and topo.ops[x.caller].service == svc)
+            expected = e.p_call * e.p_hit
+            n_cache += 1
+        else:
+            continue
+        assert abs(rec["strength"] - expected) < 1e-6, (rec["src"], rec["dst"], rec["strength"], expected)
+    assert n_invoke and n_cache
 
 
 def test_graph_is_deterministic_across_builds():

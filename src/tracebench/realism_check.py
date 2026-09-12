@@ -13,11 +13,12 @@ as such rather than hidden.
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .constants import KIND_BFF, KIND_EXTERNAL, KIND_SERVICE, OUTCOME_OK, OUTCOME_SLOW, REALISM_REPORT_JSON, REPORTS_DIR
@@ -25,6 +26,7 @@ from .instantiate import load_instantiation
 from .latency import TIER_OF_KIND
 from .log import log
 from .record import RunRecord, write_json
+from .topology import depth_distribution, service_layer
 
 QS = ("p50", "p90", "p95", "p99")
 QP = (0.5, 0.9, 0.95, 0.99)
@@ -46,6 +48,19 @@ def _pick_shards(corpus_dir, max_shards):
         idx = np.linspace(0, len(shards) - 1, max_shards).round().astype(int)
         shards = [shards[i] for i in sorted(set(int(i) for i in idx))]
     return shards
+
+
+def _invoked_fanout(shards):
+    """(mean invoked callees per calling hop, number of calling hops): first
+    attempts grouped by their parent span, over hops that invoked at least one
+    callee. A request's spans all lie in one shard, so shards count apart."""
+    children = parents = 0
+    for sh in shards:
+        t = pq.read_table(sh / "spans.parquet", columns=["parent_span_id", "attempt"])
+        t = t.filter(pc.and_(pc.equal(t["attempt"], 0), pc.is_valid(t["parent_span_id"])))
+        children += t.num_rows
+        parents += pc.count_distinct(t["parent_span_id"]).as_py() if t.num_rows else 0
+    return (children / parents if parents else 0.0), parents
 
 
 def _columns(shards, name, columns):
@@ -71,7 +86,7 @@ def realism_report(corpus_dir, max_shards=12):
     leaf_lookup = np.zeros(n_ops_total, dtype=bool)
     for op in topo.ops:
         kind_lookup[op.id] = op.kind
-        depth_lookup[op.id] = op.depth
+        depth_lookup[op.id] = service_layer(op)
         leaf_lookup[op.id] = len(topo.callee_edges(op.id)) == 0
     shards = _pick_shards(corpus_dir, max_shards)
     cols = _columns(shards, "spans.parquet", ["op", "own_us", "outcome", "attempt", "state_health", "state_pool", "state_cache", "req_gid"])
@@ -130,29 +145,31 @@ def realism_report(corpus_dir, max_shards=12):
     fan = [len(topo.callee_edges(o.id)) for o in topo.ops if o.kind in (KIND_BFF, KIND_SERVICE) and topo.callee_edges(o.id)]
     pmfs = c["fanout_pmf_by_depth"]
     exp_fan = float(np.mean([sum(i * p for i, p in enumerate(row)) / max(1e-9, 1 - row[0]) for row in pmfs]))
-    realised_fan = float(np.mean(fan)) if fan else 0.0
+    static_fan = float(np.mean(fan)) if fan else 0.0
     # Depth and fan-out are configuration targets by owner decision (the fitted
     # reference system is star-shaped); the fitted value is reported beside.
+    # Requests invoke a callee on its edge's share of requests, so the scored
+    # fan-out is the invoked one; the topology's edge count is reported beside.
     cfg_fan = float(inst.cfg.topology.fanout_mean)
-    items.append({"quantity": "fanout_mean", "constant": cfg_fan, "realised": realised_fan, "n": len(fan),
-                  "tolerance": "25% relative (configuration target)", "pass": _rel_ok(realised_fan, cfg_fan, 0.25),
-                  "fitted": exp_fan,
-                  "note": "mean callees per calling endpoint vs the instance's fanout_mean; `fitted` is the constants' expectation from fanout_pmf_by_depth (conditional on calling); reachability attachments add edges beyond the sampled fan-out"})
+    invoked_fan, n_calling = _invoked_fanout(shards)
+    items.append({"quantity": "fanout_mean", "constant": cfg_fan, "realised": invoked_fan, "n": n_calling,
+                  "tolerance": "25% relative (configuration target)", "pass": _rel_ok(invoked_fan, cfg_fan, 0.25),
+                  "fitted": exp_fan, "static_fanout": static_fan, "static_n": len(fan),
+                  "note": "mean callees invoked by a calling hop (first attempts; hops that invoked at least one callee) vs the instance's fanout_mean; `static_fanout` is the mean callee-edge count per calling endpoint in the topology (sampled fan-out plus reachability attachments); `fitted` is the constants' expectation from fanout_pmf_by_depth (conditional on calling)"})
     req = cols["req_gid"].astype(np.int64)
     uniq, inv = np.unique(req, return_inverse=True)
     req_depth = np.zeros(len(uniq), dtype=np.int64)
     np.maximum.at(req_depth, inv, depth_lookup[op])
-    levels = len(c["depth_pmf"])
-    hist = Counter(int(min(d, levels)) for d in req_depth)
-    total = sum(hist.values())
-    realised_pmf = [hist.get(i + 1, 0) / max(total, 1) for i in range(levels)]
     cfg_pmf = list(inst.cfg.topology.depth_pmf)
+    realised_pmf, root_only = depth_distribution(req_depth, len(cfg_pmf))
     tvd = 0.5 * sum(abs(a - b) for a, b in zip(realised_pmf, cfg_pmf))
     tvd_fitted = 0.5 * sum(abs(a - b) for a, b in zip(realised_pmf, c["depth_pmf"]))
-    items.append({"quantity": "depth_pmf", "constant": cfg_pmf, "realised": realised_pmf, "n": total,
-                  "tolerance": "total variation <= 0.10 (configuration target)", "pass": tvd <= 0.10,
-                  "fitted": list(c["depth_pmf"]), "tv_to_fitted": tvd_fitted,
-                  "note": "share of requests whose deepest hop is at layer 1..L below the BFF hop, vs the instance's depth_pmf; a request traverses every reachable callee (less cache hits), so the realised depth is that of the static call tree"})
+    cal = topo.calibration
+    items.append({"quantity": "depth_pmf", "constant": cfg_pmf, "realised": realised_pmf, "n": int(np.count_nonzero(req_depth >= 1)),
+                  "tolerance": "total variation <= 0.10 (configuration target)", "pass": tvd <= 0.10, "tv": tvd,
+                  "fitted": list(c["depth_pmf"]), "tv_to_fitted": tvd_fitted, "root_only_share": root_only,
+                  "calibration_tv": cal.get("tv"), "calibration_realised_pmf": cal.get("realised_pmf"),
+                  "note": "share of requests whose deepest backend-service layer is d = 1..L below the BFF hop (layer 0), among requests that reach layer 1; externals set no depth; `root_only_share` = requests answered without any backend call (cache hits). The fitted constant is on the same axis (service-chain depth below the root, root-only traces excluded). Call probabilities were calibrated to the configured pmf at instantiation by a topology-only Monte Carlo (`calibration_tv`)"})
     # --- vocabulary size ---
     n_ops = sum(1 for o in topo.ops if o.kind != 2)
     items.append({"quantity": "vocab_size", "constant": c["vocab_size"], "realised": n_ops, "n": n_ops,

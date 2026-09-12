@@ -121,7 +121,7 @@ schedules:
 run:
   seed: 0
   seeds: [0, 1, 2, 3, 4]
-  window: {start: '2026-01-05T00:00:00Z', duration_hours: 24}
+  window: {start: '2026-01-05T00:00:00Z', duration_hours: 48}
   tick_s: 1
   shard_ticks: 900
   base_rps: 4.0

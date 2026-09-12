@@ -19,3 +19,17 @@ def test_forced_reruns_reproduce_recorded_strengths():
     assert rep["max_non_edge_residual"] <= rep["non_edge_tolerance"]
     for r in rep["edges"]:
         assert 0.0 <= r["recorded"] <= 1.0 and 0.0 <= r["empirical"] <= 1.0
+
+
+def test_forced_reruns_reproduce_call_probability_edges():
+    """Invocation edges carry the call probability (times the cache miss);
+    forcing the caller or the cache must reproduce the recorded strength."""
+    corpus = xs_corpus()
+
+    def invoke_edge(e):
+        return (e["dst"].startswith("I:") and not e["dst"].startswith("I:bff")
+                and e["src"].split(":")[0] in ("I", "cache") and e["strength"] < 1.0)
+
+    rep = run_check(corpus, max_edges=4, n_non_edges=0, seed=11, edge_filter=invoke_edge)
+    assert rep["n_edges_checked"] == 4
+    assert rep["n_pass"] == rep["n_edges_checked"], [r for r in rep["edges"] if not r["pass"]]

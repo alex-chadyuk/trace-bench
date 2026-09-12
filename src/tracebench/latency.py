@@ -93,9 +93,11 @@ class LatencyModel:
     # --- nominal totals and thresholds (instantiation) ------------------------------
     def fit_thresholds(self, rng):
         """Bottom-up over call depth: an op's nominal total = own time (nominal
-        state) + the totals of callees invoked under nominal cache warmth
-        (a cached edge is skipped with probability p_hit). Uses the given
-        INSTANTIATE-stream generator; deterministic."""
+        state) + the totals of callees invoked under nominal cache warmth (a
+        callee is called with its edge's call probability and a cached call is
+        answered by the cache with probability p_hit; a callee not invoked
+        costs nothing, retries included). Uses the given generator;
+        deterministic."""
         topo = self.topo
         order = sorted((op for op in topo.ops if op.id in self.knots), key=lambda o: -o.depth)
         n = self.mc_samples
@@ -106,20 +108,28 @@ class LatencyModel:
                 # resample the callee's nominal totals (independent hop)
                 idx = rng.integers(len(callee), size=n)
                 contrib = callee[idx]
-                if e.cached:
-                    hit = rng.random(n) < e.p_hit
-                    contrib = np.where(hit, 0.0, contrib)
                 # a retried callee attempt costs its own time again plus the backoff
                 rp = self.retry_p.get(e.callee, 0.0)
                 if rp > 0:
                     retried = rng.random(n) < rp
                     contrib = contrib + np.where(retried, sample_own_time(rng, self.knots[e.callee], n) + RETRY_BACKOFF_S, 0.0)
-                total = total + contrib
+                total = total + np.where(self._skipped(rng, e, n), 0.0, contrib)
             self.nominal_samples[op.id] = total
             thr = float(np.quantile(total, self.slow_quantile))
             self.thresholds[op.id] = thr
             self.nominal_p_slow[op.id] = float(np.mean(total > thr))
         return self.thresholds
+
+    @staticmethod
+    def _skipped(rng, e, n):
+        """Requests on which a nominal caller does not invoke the callee: not
+        called (call probability) or answered by a WARM cache."""
+        skipped = np.zeros(n, bool)
+        if e.p_call < 1.0:
+            skipped |= rng.random(n) >= e.p_call
+        if e.cached:
+            skipped |= rng.random(n) < e.p_hit
+        return skipped
 
     def total_samples(self, rng, op_id, health=0, pool=0, cache_miss=False,
                       callee_classes=None, n=None, callee_retry=None):
@@ -145,9 +155,6 @@ class LatencyModel:
                 contrib = np.maximum(contrib, thr * 1.0001)
             elif forced in ("ok", "4xx", "5xx", "err"):
                 contrib = np.minimum(contrib, thr)
-            if forced is None and e.cached:
-                hit = rng.random(n) < e.p_hit
-                contrib = np.where(hit, 0.0, contrib)
             # retry time: forced by the callee's first-attempt class when given, nominal otherwise
             if callee_retry is not None and e.callee in callee_retry:
                 rp = callee_retry[e.callee]
@@ -156,6 +163,9 @@ class LatencyModel:
             if rp > 0:
                 retried = rng.random(n) < rp
                 contrib = contrib + np.where(retried, sample_own_time(rng, self.knots[e.callee], n) + RETRY_BACKOFF_S, 0.0)
+            if forced is None:
+                # a callee left at nominal may not be invoked; a forced class implies it was
+                contrib = np.where(self._skipped(rng, e, n), 0.0, contrib)
             total = total + contrib
         return total
 

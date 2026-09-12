@@ -139,6 +139,19 @@ def stationary(K, iters=100000, tol=1e-13):
     return pi / pi.sum()
 
 
+def cache_table(constants):
+    """[load][cache] -> pmf(cache'): the per-tick cache transition table (a WARM
+    cache turns COLD at the high-load hazard under HIGH load, a tenth of it
+    otherwise; a COLD cache stays COLD with the persistence probability)."""
+    hc, pc = constants["state_dynamics.cache_cold_given_high"], constants["state_dynamics.cache_persist_cold"]
+    table = np.zeros((3, 2, 2))
+    for li, load in enumerate(LOAD_VALUES):
+        high = load == "high"
+        table[li, 0] = (1 - (hc if high else hc * 0.1), hc if high else hc * 0.1)
+        table[li, 1] = (1 - pc, pc)
+    return table
+
+
 class TableNode(Node):
     """Explicit table: `table[idx(parent_1), ..., idx(parent_m)] -> pmf`."""
 
@@ -216,12 +229,7 @@ class Mechanism:
             self.pool_table[li, 0] = (1 - (ht if high else ht * 0.1), ht if high else ht * 0.1, 0.0)
             self.pool_table[li, 1] = (rp * (2.0 if low else 1.0), 1 - rp * (2.0 if low else 1.0) - (he if high else 0.0), he if high else 0.0)
             self.pool_table[li, 2] = (0.0, rp if not high else rp * 0.3, 1 - (rp if not high else rp * 0.3))
-        hc, pc = c["state_dynamics.cache_cold_given_high"], c["state_dynamics.cache_persist_cold"]
-        self.cache_table = np.zeros((3, 2, 2))         # [load][cache] -> pmf(cache')
-        for li, load in enumerate(LOAD_VALUES):
-            high = load == "high"
-            self.cache_table[li, 0] = (1 - (hc if high else hc * 0.1), hc if high else hc * 0.1)
-            self.cache_table[li, 1] = (1 - pc, pc)
+        self.cache_table = cache_table(c)              # [load][cache] -> pmf(cache')
         hd_e, hd_b, hf, hr = (c["state_dynamics.health_degraded_given_exhausted"], c["state_dynamics.health_degraded_base"],
                               c["state_dynamics.health_failed_given_degraded"], c["state_dynamics.health_recover"])
         self.health_table = np.zeros((3, 3, 3))        # [pool][health] -> pmf(health')
@@ -368,7 +376,8 @@ class Mechanism:
         """Callers' presence variables and the cache latents of cached incoming
         edges. Other callers are absent in the nominal context (an OR aggregator
         is otherwise saturated); a cache latent is measured with the first
-        caller that uses it present."""
+        caller that uses it present. A present caller calls on its edge's share
+        of requests (exogenous per-request noise, no node of its own)."""
         parents, edge_info, override, ctx_for = [], [], {}, {}
         for e in self.topo.caller_edges(op.id):
             caller = self.topo.ops[e.caller]
@@ -382,7 +391,7 @@ class Mechanism:
             for pid in ids:
                 parents.append(pid)
                 override[pid] = "absent"
-                edge_info.append((pid, cache_id, e.p_hit))
+                edge_info.append((pid, cache_id, e.p_hit, e.p_call))
             if cache_id:
                 if cache_id not in parents:
                     parents.append(cache_id)
@@ -397,11 +406,11 @@ class Mechanism:
 
         def invoke_fn(ctx, edge_info=edge_info):
             p_absent = 1.0
-            for pid, cache_id, p_hit in edge_info:
+            for pid, cache_id, p_hit, p_call in edge_info:
                 if ctx.get(pid, "absent") != "present":
                     continue
                 miss = 1.0 if cache_id is None else (1 - p_hit if ctx.get(cache_id, "warm") == "warm" else 1.0)
-                p_absent *= (1 - miss)
+                p_absent *= (1 - p_call * miss)
             return (1 - p_absent, p_absent)
 
         self._add(FunctionNode(var, parents, invoke_fn, override, ctx_for))

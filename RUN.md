@@ -55,7 +55,9 @@ the specification; this file records the implementation's departures from it.
   duration also varies *within* its class band, and a categorical graph cannot
   carry that residual. `check_mechanism` measures it: non-edges are held to
   a 0.05 tolerance and the largest residual is reported per corpus
-  (`reports/mechanism-check.json:max_non_edge_residual`, 0.04 on xs).
+  (`reports/mechanism-check.json:max_non_edge_residual`; 0.001 on the
+  2026-09-11 xs corpus, 0.04 on the v0.1 one — the value depends on which
+  non-edges the run sampled).
 - **D-TB-10 — the scoring target is restricted to co-occurrence support.**
   Token pairs whose operations can never share a request tree (request grain)
   or a journey (session grain) are outside the scoring universe; without this
@@ -72,32 +74,80 @@ the specification; this file records the implementation's departures from it.
   tenths of a percent could not double a hop's error rate as PRD scenario 8
   requires once propagated errors dominate its baseline.
 
-- **D-TB-12 — rung windows are sized to the cap, not to the plan's budget
-  table.** The named instances keep the planned service × endpoint counts but
-  simulate shorter windows at lower rates than the plan's budget table
-  assumed, because every operation must be reachable from a journey (below)
-  and that pushes the effective fan-out — hence hops per session — well above
-  the fitted mean. Sizes are estimates from `tracebench.estimate` at seed 0
-  (the estimator matched the realised xs corpus within 10 %):
+- **D-TB-12 — rung rates are sized to the cap, not to the plan's budget
+  table.** The named instances keep the planned service × endpoint counts at
+  lower rates than the plan's budget table assumed: 5 / 4 / 3 / 3 rps for
+  s / m / l / xl, against 5 / 10 / 20 / 30. In v0.1 the windows were also cut
+  to 24 h (m, l, xl ≈ 16, 26 and 35 GB), because every operation must be
+  reachable from a journey (below) and full request trees pushed hops per
+  session far above the fitted mean. Per-edge call probabilities (D-TB-13)
+  bring a request to about 4.5 hops, so on 2026-09-11 the windows returned to
+  the plan's day counts. Sizes are estimates from `tracebench.estimate` at
+  seed 0 (the estimator matched the realised xs corpus within 10 %):
 
   | rung | services × endpoints + BFF | scenarios | window | rate | est. GB | est. CPU-h | expected realized tokens |
   |---|---|---|---|---|---|---|---|
-  | xs | 3 × 3 + 4 | 2 | 1 h | 1 rps | 0.03 | 0.00 | 45 |
-  | s | 10 × 5 + 8 | 4 | 24 h | 5 rps | 7.0 | 0.6 | 185 |
-  | m | 50 × 10 + 20 | 8 | 24 h | 4 rps | 15.9 | 1.4 | 1,548 |
-  | l | 150 × 10 + 30 | 12 | 24 h | 3 rps | 26.4 | 2.3 | 4,531 |
-  | xl | 350 × 12 + 60 | 20 | 24 h | 3 rps | 35.1 | 3.1 | 12,554 |
+  | xs | 3 × 3 + 4 | 2 | 1 h | 1 rps | 0.03 | 0.00 | 44 |
+  | s | 10 × 5 + 8 | 4 | 1 d | 5 rps | 4.2 | 0.4 | 188 |
+  | m | 50 × 10 + 20 | 8 | 2 d | 4 rps | 6.7 | 0.6 | 1,573 |
+  | l | 150 × 10 + 30 | 12 | 3 d | 3 rps | 8.1 | 0.7 | 4,325 |
+  | xl | 350 × 12 + 60 | 20 | 5 d | 3 rps | 16.8 | 1.6 | 10,750 |
 
   CPU-hours are single-core; `--workers` parallelises across shards. The xl
-  rung exceeds the PRD's 8,000-token alphabet target by expectation; the
-  manifest's `alphabet_size_realized_train` is the measured value. Calibration
-  of the estimator on the realised s run (below): size within 15 % (6.0 GB
-  realised vs 7.0 estimated), CPU time under-estimated 2.2× (1.36 CPU-h
-  realised on Apple silicon), realized alphabet under-estimated (322 vs 185:
-  the estimator counts tokens at the nominal latent context only, and
-  incidents and load states realise more classes). Per-shard correlation ran
-  at ~14 s per 15-minute shard single-threaded (22 min for s); peak resident
-  memory of the driver was 6 GB.
+  rung exceeds the PRD's 8,000-token alphabet target by expectation (10,750 of
+  12,849 potential tokens; 8,875 at a 24 h window). The manifest's
+  `alphabet_size_realized_train` is the measured value. The estimator
+  counts tokens at the nominal latent context only, so incidents and load
+  states realise more classes than it predicts (v0.1 s: 322 realised against
+  185 estimated). Single-shard timing on Apple silicon (noon shard, D-TB-13
+  code): s 28 s (engine 0.3, emission 21, write 6.5) and xl 24 s (engine 5,
+  emission 14, write 4.5). Emission dominates and scales with hops.
+
+- **D-TB-13 — per-edge call probability; request depth calibrated
+  (2026-09-11).** Every call edge carries `p_call`, the share of its caller's
+  requests that invoke the callee. The call is drawn per request from its own
+  counter-keyed coordinate (`H_CALL`); the earlier coordinates keep their
+  numbers, so every other draw is unchanged. A callee is invoked when a caller
+  is, the call draw falls under `p_call` and the call misses its cache. No
+  latent and no mechanism node is added. The invoke tables gain the factor:
+  an invoke edge's strength is `p_call × (1 − p_hit)` on a WARM cached call
+  and `p_call` otherwise. The latency model, the size and alphabet estimators
+  and the twin read the same probabilities; in the latency model a callee
+  that is not invoked adds no time, retries included. The topology sampler's
+  structural depth gate is removed: every endpoint above the deepest layer
+  samples callees, and the probabilities set how deep a request goes.
+  - *Depth semantics (pinned).* A request's depth is the deepest
+    backend-service layer its invoked hops reach; the BFF is layer 0 and
+    externals set no depth. `depth_pmf[d-1]` is the share of requests at depth
+    d among requests that reach layer 1, and requests answered without any
+    backend call are reported as `root_only_share`. The fitted constant is on
+    the same axis (SERVER ancestors below the root, root-only traces
+    excluded).
+  - *Calibration.* The parameters are per-layer stop probabilities `s_d`: an
+    invoked layer-d endpoint with k backend callees gives each edge
+    `1 − s_d^(1/k)`, and its external calls take the same probability. The
+    closed form `s_d = stop_d^(1/f^d)` seeds a topology-only Monte Carlo:
+    20,000 requests over BFF endpoints in proportion to scenario weight ×
+    visiting steps, WARM caches at the nominal stationary share, and common
+    random numbers across steps. It refits the effective exponent for at most
+    6 steps, stops at TV ≤ 0.02 and keeps the best step. Probabilities are
+    floored at 0.02. `instantiation.json:topology.calibration` records the
+    steps, TV, realised pmf, root-only share and stop probabilities. Seed 0:
+    xs TV 0.004, s 0.004, m 0.012, l 0.016, xl 0.003.
+  - *BFF edges (owner selection 2026-09-11).* A BFF endpoint makes its sampled
+    layer-1 calls and its external calls on every request, so every request
+    reaches layer 1. The `m` layer-1 endpoints attached to it only by the
+    reachability rule carry `1/m` each (floor 0.02), and a deeper endpoint
+    attached to a BFF is called as often as one layer-1 endpoint continues.
+    Edges record `attached`. Under the plan's literal rule (every BFF →
+    layer-1 edge at 1.0) an xl BFF endpoint called about 40 backends on every
+    request, half of all xl edges sat at the floor and the xl calibration
+    stalled at TV 0.17 (l: 0.032).
+  - *Effect.* About 4.5 hops per request at every rung (full request trees on
+    the gate-free topology: 12 non-BFF hops at s, 51 at m, 105 at l, 161 at
+    xl), so D-TB-12's windows were re-tuned. The realism report scores fan-out
+    on the callees a calling hop actually invokes and reports the topology's
+    edge count beside it.
 
 ## Implementation notes (not deviations)
 
@@ -133,23 +183,24 @@ the specification; this file records the implementation's departures from it.
   test. The placeholder's 20 ms server clock skew is not a property of the
   fitted feed (0 ms), and tests on it validated the placeholder, not the
   benchmark.
-- **Realism at the s rung (2026-09-10, 12 sampled shards of 96, fitted
-  constants, `error_rate_multiplier: 10`).** Latency quantiles match at every
-  tier except the BFF p99 (+11 %, p95 +9 %: the BFF's own time absorbs the
-  callee retry back-off; unresolved), leaf error rates match the declared
-  ×10 target, external p50–p99 match, session step-gap p90–p99 match while
-  the p50 is +28 % (audited-response gaps include the next request's
-  duration, and the external tier's heavy tail inflates the median;
-  unresolved). **Request depth is the open realism gap:** 90 % of s requests
-  reach the deepest layer against a configured pmf of `[0.5, 0.35, 0.15]`,
-  because a request traverses every reachable callee and the reachability
-  rule makes trees full. Restoring the configured depth needs a per-edge
-  call probability (a callee invoked on a share of its caller's requests,
-  with `p = 1 - stop^(1/(f^d·k))` from the pmf), which changes the mechanism's
-  invoke tables, the engine's draws, the estimator and the alphabet — an
-  owner decision, recorded as open in the PRD. Until then `depth_pmf` and
-  `fanout_mean` are scored against the configuration targets (fitted values
-  reported beside them) and `depth_pmf` fails at s.
+- **Realism at the s rung (2026-09-11, D-TB-13 code, 12 sampled shards of 96,
+  fitted constants, `error_rate_multiplier: 10`).** 18 of 20 scored items
+  pass. **Request depth now matches the configuration:** realised
+  `[0.497, 0.350, 0.153]` against the configured `[0.5, 0.35, 0.15]`, total
+  variation 0.003, with 7.1 % of requests answered without any backend call
+  (cache hits) and an instantiation calibration TV of 0.004. The v0.1 corpus
+  realised `[0.070, 0.033, 0.897]` — 90 % of requests at the deepest layer —
+  and failed the item. Invoked fan-out is 2.14 against the configured 2.0
+  (the topology's static edge count per calling endpoint is 2.40). Latency
+  quantiles match at every tier except the BFF p95 (+16 %): the BFF's own
+  time absorbs the callee retry back-off, the same unresolved channel that
+  showed as p99 +11 % in v0.1 (the p99 now passes). Leaf error rates match
+  the declared ×10 target, external p50–p99 match, session step-gap p90–p99
+  match while the p50 is +29 % (audited-response gaps include the next
+  request's duration, and the external tier's heavy tail inflates the median;
+  unresolved). The xs corpus on the same code: 18/20, depth TV 0.004,
+  invoked fan-out 1.95. Depth and fan-out are scored against the
+  configuration targets, with the fitted values reported beside them.
 - **The realism report samples 12 evenly spaced shards** (`--max-shards`,
   0 = all): the quantities are per-hop and per-session statistics, and the
   whole s corpus as Python objects took hours. `verify` re-hashes every
@@ -214,4 +265,6 @@ the specification; this file records the implementation's departures from it.
 | date | instance | variant | seed | command | tool | constants | where | verdict |
 |---|---|---|---|---|---|---|---|---|
 | 2026-09-10 | s | latent | 0 | `python -m tracebench.generate --config configs/instances/s.yaml --seed 0 --out <scratch> --workers 3` | 0.1.0 (uncommitted tree) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 96 shards, 6.0 GB (raw 3.5 / oracle 2.1 / views 0.4), 47 min wall / 81 CPU-min, driver RSS 6.05 GB; correlator parent-link F1 0.9994, unattributed 0.56 %, session Jaccard 1.00, 434,181 sessions, 1.49 M request rows; alphabet realized (train) 322 of 323 potential, vocab 326; orientation violations start 0.05 % / end 1.4 %; `verify` manifest ok, names ok; realism 17/20 scored items pass on 12 sampled shards (fails: BFF own-time p99 +11 %, `depth_pmf` 90 % deepest layer vs configured 15 %, step-gap p50 +28 %; see Implementation notes). Scratch run, superseded 2026-09-11 by the row below (one `log_source` value renamed). |
-| 2026-09-11 | s | latent | 0 | `python -m tracebench.generate --config configs/instances/s.yaml --seed 0 --out ~/tracebench-corpora --workers 3` | 0.1.0 (uncommitted tree) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 96 shards, 6.0 GB, 50 min wall / 86 CPU-min, driver RSS 5.5 GB; parent-link F1 0.9994, unattributed 0.56 %; alphabet realized (train) 322, vocab 326, 3.86 M view rows; orientation violations start 0.05 % / end 1.4 %; `verify` manifest ok, names ok **including the private denylist**; realism 17/20 (same three misses as above). Pushed to the lab's private object store under `corpora/s/latent/seed=0`; also xs latent + twin (seed 0, same date, verify + denylist clean). Not frozen, not published. |
+| 2026-09-11 | s | latent | 0 | `python -m tracebench.generate --config configs/instances/s.yaml --seed 0 --out ~/tracebench-corpora --workers 3` | 0.1.0 (uncommitted tree) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 96 shards, 6.0 GB, 50 min wall / 86 CPU-min, driver RSS 5.5 GB; parent-link F1 0.9994, unattributed 0.56 %; alphabet realized (train) 322, vocab 326, 3.86 M view rows; orientation violations start 0.05 % / end 1.4 %; `verify` manifest ok, names ok **including the private denylist**; realism 17/20 (same three misses as above). Pushed to the lab's private object store under `corpora/s/latent/seed=0`; also xs latent + twin (seed 0, same date, verify + denylist clean). Not frozen, not published. **Superseded 2026-09-11 by the D-TB-13 rows below**: removed from the object store, local copies kept aside as `seed=0.v01-superseded-26-09-11`. |
+| 2026-09-11 | xs | latent + twin | 0 | `python -m tracebench.generate --config configs/instances/xs.yaml --seed 0 --out ~/tracebench-corpora [--twin]` | 0.1.0 (uncommitted, D-TB-13) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 4 shards each, 29 MB each, 55 s for both variants; realism 18/20 (request depth passes, TV 0.004, invoked fan-out 1.95; misses: external p95 −10 %, step-gap p50 +38 %; the external p95 is sampling noise in a steep tail — 1.1 resampling SE on 4,578 spans, the constant inside the item's 90 % bootstrap interval [3.77, 4.92] s, and external p50–p99 all pass at s); `check_mechanism --max-edges 40 --non-edges 8` on the latent variant: 39/40 sampled edges within 0.03 (the miss is the SLOW-mediated `F:9 → A:6:0` at 0.031, the D-TB-9 residual channel), non-edges 8/8 with a largest residual of 0.0012; `verify` manifest, names and private denylist clean. |
+| 2026-09-11 | s | latent | 0 | `python -m tracebench.generate --config configs/instances/s.yaml --seed 0 --out ~/tracebench-corpora --workers 3` | 0.1.0 (uncommitted, D-TB-13) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 96 shards, 3.5 GB (estimate 4.2), 27.6 min wall with 3 workers; correlator parent-link F1 0.9991, unattributed 0.88 %, session Jaccard 1.00, 434,181 sessions, 3.83 M view rows; alphabet realized (train) 322 of 323 potential, vocab 323; realism 18/20 (request depth passes, TV 0.003; misses: BFF p95 +16 %, step-gap p50 +29 %); `verify` manifest, names and private denylist clean. Not frozen, not published. |

@@ -2,13 +2,19 @@
 uninterrupted run), 22 (size cap refusal and override) and the twin's
 identity with the latent instance."""
 import json
+from collections import defaultdict
 
 import pyarrow.parquet as pq
 import pytest
 
-from tracebench.generate import CapExceeded, generate
+from tracebench.engine import H_CALL, H_HIT, Engine
+from tracebench.generate import CapExceeded, generate, spill_allowance
+from tracebench.hashing import D_HOP, uniforms
+from tracebench.instantiate import instantiate
+from tracebench.latents import Slots, initial_state, simulate_latents
 from tracebench.shards import completed_shards, read_records
 from corpus_fixture import corpus_checksums, scratch_dir, write_variant_config, xs_corpus
+from xs_fixture import xs_instantiation
 
 
 def test_regeneration_is_byte_identical():
@@ -19,6 +25,46 @@ def test_regeneration_is_byte_identical():
     assert all(ca[k] == cb[k] for k in ca), [k for k in ca if ca[k] != cb[k]]
     assert any(k.startswith("raw/") for k in ca) and any(k.startswith("oracle/") for k in ca)
     assert (a / "COMPLETE").exists()
+
+
+def test_invocation_composes_the_call_draw_with_the_cache():
+    """Request by request the engine invokes exactly the ops an independent
+    top-down evaluation of `caller invoked, call draw < p_call, and not (cache
+    WARM and hit draw < p_hit)` gives. With every p_call = 1 that is the rule
+    without call probabilities (a request traverses its reachable subtree less
+    cache hits), which invokes more hops."""
+    base = xs_instantiation()
+    t1 = 600
+    hop_counts = {}
+    for label in ("calibrated", "p_call=1"):
+        inst = instantiate(base.cfg, base.constants, 0)          # a private copy: its edges are edited below
+        if label == "p_call=1":
+            for e in inst.topo.edges:
+                e.p_call = 1.0
+        topo = inst.topo
+        slots = Slots.build(topo)
+        latents, _ = simulate_latents(inst, 0, slots, initial_state(slots), 0, t1 + spill_allowance(inst))
+        res = Engine(inst, 0, slots).run_shard(0, 0, t1, latents)
+        h, q = res.hops.cols, res.requests.cols
+        engine_ops = defaultdict(set)
+        for row, op, k in zip(h["request_row"], h["op"], h["attempt"]):
+            if k == 0:
+                engine_ops[int(row)].add(int(op))
+        assert len(q["request_row"]) > 500
+        for row, b, rg, tick in zip(q["request_row"], q["bff_op"], q["req_gid"], q["tick"]):
+            invoked = {int(b)}
+            for v in topo.reachable_from(int(b))[1:]:
+                for e in topo.caller_edges(v):
+                    if e.caller not in invoked or float(uniforms(0, D_HOP, int(rg), e.index, H_CALL)) >= e.p_call:
+                        continue
+                    warm = latents.cache[int(tick) - latents.t0, slots.svc_slot_of_op[e.caller]] == 0
+                    if e.cached and warm and float(uniforms(0, D_HOP, int(rg), e.index, H_HIT)) < e.p_hit:
+                        continue
+                    invoked.add(v)
+                    break
+            assert invoked == engine_ops[int(row)], (label, int(row), invoked, engine_ops[int(row)])
+        hop_counts[label] = sum(len(s) for s in engine_ops.values())
+    assert hop_counts["p_call=1"] > hop_counts["calibrated"], hop_counts
 
 
 def test_resume_equals_uninterrupted_run():

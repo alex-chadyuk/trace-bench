@@ -28,7 +28,7 @@ yet. The package name is `tracebench`; every command runs as
 | `family`, `artifacts`, `publish` | family sampling with a held-out split; object-store push/pull; HuggingFace release |
 
 Named instances (`configs/instances/`): `xs` (test fixture, seconds),
-`s`, `m`, `l` (local, up to ~26 GB per corpus) and `xl` (cloud, ~35 GB,
+`s`, `m`, `l` (local, up to ~8 GB per corpus) and `xl` (cloud, ~17 GB,
 > 10,000 expected realized tokens). Sizes and the deviation record are in
 `RUN.md`.
 
