@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constants import KIND_BFF, KIND_CLIENT, KIND_EXTERNAL, KIND_SERVICE, T_VALUES
+from .constants import KIND_BFF, KIND_CLIENT, KIND_EXTERNAL, KIND_SERVICE, MC_DECIMALS, T_VALUES
 from .realism import QUANTILE_KEYS
 from .tables import build_class_tables, nominal_retry_probability
 
@@ -115,7 +115,12 @@ class LatencyModel:
                     contrib = contrib + np.where(retried, sample_own_time(rng, self.knots[e.callee], n) + RETRY_BACKOFF_S, 0.0)
                 total = total + np.where(self._skipped(rng, e, n), 0.0, contrib)
             self.nominal_samples[op.id] = total
-            thr = float(np.quantile(total, self.slow_quantile))
+            # Rounded before it is stored, so the threshold that ships is the
+            # threshold the engine classifies against and neither depends on the
+            # CPU architecture's last bit (MC_DECIMALS). nominal_p_slow is left
+            # as measured: it is a count over mc_samples, so rounding could not
+            # absorb a sample crossing the threshold anyway.
+            thr = round(float(np.quantile(total, self.slow_quantile)), MC_DECIMALS)
             self.thresholds[op.id] = thr
             self.nominal_p_slow[op.id] = float(np.mean(total > thr))
         return self.thresholds

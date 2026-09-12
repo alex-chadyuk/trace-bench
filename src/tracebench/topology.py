@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .constants import KIND_BFF, KIND_CLIENT, KIND_EXTERNAL, KIND_SERVICE
+from .constants import KIND_BFF, KIND_CLIENT, KIND_EXTERNAL, KIND_SERVICE, MC_DECIMALS
 from .naming import BFF_SERVICE, Namer
 
 
@@ -390,7 +390,17 @@ def simulate_request_depths(topo, weights, n_requests, seeds, warm_share):
 
 
 def _clamp_call_p(p):
-    return float(min(1.0, max(CALL_P_MIN, p)))
+    """Clamp to [CALL_P_MIN, 1] and round (MC_DECIMALS).
+
+    Every computed call probability passes through here, so rounding at this
+    one point makes the shipped probabilities architecture-independent — they
+    come out of `stop ** (1/k)`, and a libm `pow` is not bit-stable across
+    architectures. The rounding happens INSIDE the calibration loop, so the
+    Monte Carlo measures, and `calibration.realised_pmf` records, the depth of
+    exactly the probabilities that ship. At 1e-9 it cannot move a calibration
+    whose tolerance is 0.02.
+    """
+    return round(float(min(1.0, max(CALL_P_MIN, p))), MC_DECIMALS)
 
 
 def _set_call_probabilities(topo, stop_by_layer):

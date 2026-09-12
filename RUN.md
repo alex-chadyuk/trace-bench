@@ -191,6 +191,57 @@ the specification; this file records the implementation's departures from it.
     corpus's identity does not depend on which release names it; a release is a
     tag over corpora already uploaded.
 
+- **D-TB-15 — Monte-Carlo-derived floats are quantised, because they are not
+  bit-stable across CPU architectures (2026-09-12).** The cross-machine half of
+  PRD scenario 12 was exercised for the first time against a cloud run of the
+  `xs` rung (five seeds, both variants, generated on x86-64 Linux) and **it
+  failed**: 6 of the 70 files of `xs/latent/seed=0` differed from the same
+  corpus generated on arm64 macOS — `instantiation.json`,
+  `slow-thresholds.json` and the four copies of that file under `views/`.
+  - *Cause.* Exactly one float: the fitted SLOW threshold of one operation came
+    out `0.02184745943679561` on x86-64 and `0.021847459436795613` on arm64 —
+    **1 unit in the last place**, relative 1.6e-16. Python (3.11.16), numpy
+    (2.4.6) and pyarrow (25.0.1) were identical on both sides, so this is the
+    architecture, not version drift: `fit_thresholds` takes a quantile over
+    20,000 lognormal draws, and the ordering of the transcendental transform
+    inside libm/vectorised code differs between the two. The extra digit also
+    made the file one byte longer, so the divergence was visible to a size
+    check as well as to a checksum.
+  - *What was unaffected.* Every `raw/`, `oracle/`, `views/` and `graphs/`
+    artifact was byte-identical, so no outcome class flipped: the perturbation
+    is ~14 orders of magnitude below the millisecond granularity of a record.
+    The D-TB-13 `topology.calibration` block was bit-identical — **because it
+    was already rounded** (to 6 decimals), which is what located the gap: the
+    fitted latency thresholds were the one Monte-Carlo quantity that reached an
+    artifact unrounded.
+  - *Fix.* `MC_DECIMALS = 9` (`constants.py`). The fitted SLOW threshold is
+    rounded **where it is computed**, not where it is written, so the value
+    that ships is the value the engine classifies against; rounding only at
+    serialisation would have left an architecture-dependent threshold in force
+    and could have flipped a class. Call probabilities are rounded at
+    `_clamp_call_p`, the single point every computed `p_call` passes through,
+    and therefore inside the calibration loop — so `calibration.realised_pmf`
+    records the depth of exactly the probabilities that ship. Nine decimals is
+    one nanosecond on a seconds-valued threshold and 1e-9 on a probability:
+    ~7 orders of magnitude above the ULP noise, and far below the calibration's
+    0.02 tolerance and the 0.05 strength floor.
+  - *Consequence — not a pure serialisation change.* Because the threshold
+    feeds the Monte-Carlo estimate of the slow-related mechanism strengths,
+    quantisation moves those estimates slightly: on `xs/latent/seed=0`, 8 of 70
+    files differ from 0.2.0 (the 6 above plus both scoring targets), with 30 of
+    8,781 scoring-target leaves changing by at most **2.3e-11** absolute
+    (5.8e-10 relative). Edge sets and floor counts are unchanged — 520
+    directed, 915 bidirected, 467 and 108 at the floor. The emitted data is
+    unchanged.
+  - *Guard.* `tests/test_byte_identity.py::test_every_monte_carlo_derived_float_is_quantised`
+    asserts that every fitted threshold and every call probability, in memory
+    and as serialised, equals its own rounding — so a future unrounded fitted
+    quantity fails a test instead of a rung.
+  - Corpora generated at 0.2.0 are superseded: the ten `xs` corpora published
+    on 2026-09-12 must be regenerated at 0.2.1 (their manifests name 0.2.0, so
+    they are distinguishable, and the versioned object-store prefix keeps them
+    apart).
+
 ## Implementation notes (not deviations)
 
 - **Every operation lies on a journey.** The topology sampler attaches an
@@ -269,8 +320,8 @@ the specification; this file records the implementation's departures from it.
   the private denylist is part of a corpus being called verified. Nothing
   private is compiled into the module: the denylist path, the staging directory
   and the dataset repository are arguments.
-- **The xs checksum fixture** (`tests/fixtures/xs-checksums.json`, frozen
-  2026-09-12 at tool version 0.2.0) pins the per-file sha256 of
+- **The xs checksum fixture** (`tests/fixtures/xs-checksums.json`, re-frozen
+  2026-09-12 at tool version 0.2.1 for D-TB-15) pins the per-file sha256 of
   `xs/{latent,twin}/seed=0` — 70 and 74 files — generated from the shipped
   `configs/instances/xs.yaml`. The configuration path matters: `config_hash`
   covers the `constants` field as written in the file, so a rewritten copy of
@@ -348,3 +399,5 @@ the specification; this file records the implementation's departures from it.
 | 2026-09-11 | xs | latent + twin | 0 | `python -m tracebench.generate --config configs/instances/xs.yaml --seed 0 --out ~/tracebench-corpora [--twin]` | 0.1.0 (uncommitted, D-TB-13) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 4 shards each, 29 MB each, 55 s for both variants; realism 18/20 (request depth passes, TV 0.004, invoked fan-out 1.95; misses: external p95 −10 %, step-gap p50 +38 %; the external p95 is sampling noise in a steep tail — 1.1 resampling SE on 4,578 spans, the constant inside the item's 90 % bootstrap interval [3.77, 4.92] s, and external p50–p99 all pass at s); `check_mechanism --max-edges 40 --non-edges 8` on the latent variant: 39/40 sampled edges within 0.03 (the miss is the SLOW-mediated `F:9 → A:6:0` at 0.031, the D-TB-9 residual channel), non-edges 8/8 with a largest residual of 0.0012; `verify` manifest, names and private denylist clean. |
 | 2026-09-11 | s | latent | 0 | `python -m tracebench.generate --config configs/instances/s.yaml --seed 0 --out ~/tracebench-corpora --workers 3` | 0.1.0 (uncommitted, D-TB-13) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 96 shards, 3.5 GB (estimate 4.2), 27.6 min wall with 3 workers; correlator parent-link F1 0.9991, unattributed 0.88 %, session Jaccard 1.00, 434,181 sessions, 3.83 M view rows; alphabet realized (train) 322 of 323 potential, vocab 323; realism 18/20 (request depth passes, TV 0.003; misses: BFF p95 +16 %, step-gap p50 +29 %); `verify` manifest, names and private denylist clean. Not frozen, not published. |
 | 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.0 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 4 shards per variant, 49 s for the whole job (generate 20.6 s + 17.0 s, verify 5.4 s + 5.7 s); `verify` manifest, names and private denylist clean on both variants (200k records scanned each). **Freeze source of `tests/fixtures/xs-checksums.json`** (70 files latent, 74 twin, config_hash `1656f43b4b6e5deb690a31574bd98e55`); regeneration with one worker reproduces every checksum. Not uploaded: the published xs corpora come from the cloud job over all five seeds. |
+| 2026-09-12 | xs | latent + twin | 0..4 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 1 2 3 4 --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.0 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 10 corpora, 21 steps ok, 581 s total (40-55 s generate and ~11 s verify per corpus; the single upload of all ten, 292 MB, took 21.2 s); `verify` manifest, names and private denylist clean on all ten; published to the dataset host as `instances/xs/{latent,twin}/seed=0..4` (72 / 76 files each, no `run/`, no `artifacts.json`) and written back to the versioned object-store prefix (783 objects). **Cross-machine byte identity FAILED on 6 of 70 metadata files — see D-TB-15.** Superseded by 0.2.1; to be regenerated. |
+| 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.1 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 49 s for the job; `verify` manifest, names and private denylist clean on both variants. **Re-freeze source of `tests/fixtures/xs-checksums.json` after D-TB-15** (70 / 74 files, config_hash `1656f43b4b6e5deb690a31574bd98e55` — unchanged, the configuration did not move). |
