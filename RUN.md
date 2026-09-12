@@ -242,6 +242,54 @@ the specification; this file records the implementation's departures from it.
     they are distinguishable, and the versioned object-store prefix keeps them
     apart).
 
+- **D-TB-16 — the spill allowance is a heuristic, so overspill is recovered by
+  re-running the shard (2026-09-12).** Two of the five `s` jobs of the v0.2.1
+  ladder died in `generate` with `IndexError: index 2872 is out of bounds for
+  axis 0 with size 2839` (seed 1) and `index 2845 ... size 2839` (seed 4).
+  - *Cause.* `2839 = run.shard_ticks (900) + spill_allowance (1939)`, the height
+    of the latent slice a shard holds. `spill_allowance` is a tail heuristic —
+    `max_steps × (3·p99_step_gap + max_attempts × (3·p99_bff_latency × 4 + 2)) + 5`,
+    of which the step gap is 1,885 ticks at `s` — and **not a bound**. A long
+    enough journey outruns it and `engine._state_at` indexed the slice out of
+    range.
+  - *Where it bites systematically.* The `.done` markers of the failed runs name
+    the culprit: every shard up to 31 completed **except shard 15** in both
+    seeds (seed 1 also lost shard 28). Shard 15 ends at tick 14,400 — exactly
+    where the configured `degrade` fault on `service:2` begins. Journeys
+    arriving late in that shard spill into the degraded window, where retries
+    and inflated latencies stretch them far past the heuristic. So **the shard
+    immediately preceding each scheduled fault is the structural risk**, at
+    every rung, and it is not seed-specific. Seed 1's shard 28 sits near no
+    fault, so ordinary tail overshoot is a second, independent cause. Rungs with
+    more sessions are likelier to hit both.
+  - *Fix.* The engine raises `SpillExceeded(needed_ticks, held_ticks, t0)` from
+    the latent access instead of letting numpy raise, and `run_one_shard`
+    re-simulates the slice at `needed − (t1 − t0) + SPILL_RETRY_MARGIN` (600
+    ticks) and re-runs the shard, up to `SPILL_RETRY_MAX` (4) attempts, after
+    which it refuses and names the knob to raise. The bounds check is
+    vectorised: `tick` is a vector of ticks, one per request in the group.
+  - *Why re-running is sound.* `simulate_latents` draws its uniforms keyed by
+    the **absolute tick** and advances the chain from a recorded checkpoint, so a
+    taller slice holds the same values at every tick the shorter one held. A
+    retried shard is therefore byte-identical to one generated with a large
+    enough allowance from the start — asserted by
+    `tests/test_engine.py::test_a_retried_shard_is_byte_identical_to_one_with_enough_allowance`.
+    The retry costs one shard's work (about 30 s at `s`, 24 s at `xl`).
+  - *Measured on the real failures.* Re-running the exact failing shards, each
+    recovered in **one** retry: seed 1 shard 15 needed 2,873 ticks against 2,839
+    held (34 over), seed 1 shard 28 needed 3,375 (536 over — the 600-tick margin
+    covered it, but not by much), seed 4 shard 15 needed 2,846 (7 over). At the
+    shipped allowance the `xs` rung needs no retry at all, which a test pins.
+  - *Effect on a corpus.* None beyond the recorded version: against 0.2.1 the
+    only file that moves is `instantiation.json`, which names `tool_version`.
+    Corpora generated at 0.2.1 that never overspilled are otherwise
+    byte-identical to their 0.2.2 regeneration, and `config_hash` is unchanged.
+  - *Diagnosability.* `tracebench.pipeline` previously logged only
+    `"IndexError: ..."` for a failed step, so the cloud log carried no stack and
+    the location had to be re-derived from the array size. It now emits the
+    traceback line by line as `pipeline_traceback` events before the step
+    record.
+
 ## Implementation notes (not deviations)
 
 - **Every operation lies on a journey.** The topology sampler attaches an
@@ -321,7 +369,7 @@ the specification; this file records the implementation's departures from it.
   private is compiled into the module: the denylist path, the staging directory
   and the dataset repository are arguments.
 - **The xs checksum fixture** (`tests/fixtures/xs-checksums.json`, re-frozen
-  2026-09-12 at tool version 0.2.1 for D-TB-15) pins the per-file sha256 of
+  2026-09-12 at tool version 0.2.2 for D-TB-16) pins the per-file sha256 of
   `xs/{latent,twin}/seed=0` — 70 and 74 files — generated from the shipped
   `configs/instances/xs.yaml`. The configuration path matters: `config_hash`
   covers the `constants` field as written in the file, so a rewritten copy of
@@ -401,3 +449,7 @@ the specification; this file records the implementation's departures from it.
 | 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.0 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 4 shards per variant, 49 s for the whole job (generate 20.6 s + 17.0 s, verify 5.4 s + 5.7 s); `verify` manifest, names and private denylist clean on both variants (200k records scanned each). **Freeze source of `tests/fixtures/xs-checksums.json`** (70 files latent, 74 twin, config_hash `1656f43b4b6e5deb690a31574bd98e55`); regeneration with one worker reproduces every checksum. Not uploaded: the published xs corpora come from the cloud job over all five seeds. |
 | 2026-09-12 | xs | latent + twin | 0..4 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 1 2 3 4 --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.0 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 10 corpora, 21 steps ok, 581 s total (40-55 s generate and ~11 s verify per corpus; the single upload of all ten, 292 MB, took 21.2 s); `verify` manifest, names and private denylist clean on all ten; published to the dataset host as `instances/xs/{latent,twin}/seed=0..4` (72 / 76 files each, no `run/`, no `artifacts.json`) and written back to the versioned object-store prefix (783 objects). **Cross-machine byte identity FAILED on 6 of 70 metadata files — see D-TB-15.** Superseded by 0.2.1; to be regenerated. |
 | 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.1 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 49 s for the job; `verify` manifest, names and private denylist clean on both variants. **Re-freeze source of `tests/fixtures/xs-checksums.json` after D-TB-15** (70 / 74 files, config_hash `1656f43b4b6e5deb690a31574bd98e55` — unchanged, the configuration did not move). |
+| 2026-09-12 | xs | latent + twin | 0..4 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 1 2 3 4 --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 10 corpora, 21 steps ok, 577 s, upload 27.2 s; `verify` manifest, names and denylist clean on all ten; realised alphabet by seed 78 / 77 / 76 / 79 / 79. **Cross-machine byte identity PASSES** — all 70 sha256 of `latent/seed=0` and 74 of `twin/seed=0` match the fixture frozen on arm64 macOS, confirming D-TB-15. Published to the dataset host and the versioned object-store prefix. |
+| 2026-09-12 | s | latent + twin | 0, 2, 3 | `python -m tracebench.pipeline --config configs/instances/s.yaml --seeds <k> --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 2 corpora per job, 5 steps ok each. Wall clock per job 7,656–8,622 s (2.1–2.4 h): generate ≈ 3,778–4,218 s per corpus, verify only ~21 s, upload 64–297 s. 96 shards, realised alphabet 322 of 323 potential, identical `config_hash` across seeds. `verify` manifest, names and private denylist clean. **2.3× the plan's ≈ 1 h estimate** — EC2 is slower than the local Apple-silicon timing the estimate came from, and emission is single-core-bound; re-estimates m ≈ 4.6 h, l ≈ 6.9 h, xl ≈ 14–23 h against caps of 12 h and 36 h. |
+| 2026-09-12 | s | latent | 1, 4 | same as above, `--seeds 1` / `--seeds 4` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **FAILED at shard 15 (both) and shard 28 (seed 1)** after 852 s and 906 s: `IndexError ... size 2839` — the spill allowance, see **D-TB-16**. Nothing was uploaded; the partial corpora reached the object store without a `COMPLETE` marker (196 and 202 objects), so they cannot be mistaken for whole ones. To be re-run at 0.2.2. |
+| 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.2 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 47 s; `verify` manifest, names and denylist clean. **Re-freeze source of `tests/fixtures/xs-checksums.json` after D-TB-16**; only `instantiation.json` differs from the 0.2.1 corpus (it records `tool_version`), `config_hash` unchanged. |

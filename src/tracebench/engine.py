@@ -66,6 +66,24 @@ class Table:
         return len(next(iter(self.cols.values()))) if self.cols else sum(len(next(iter(p.values()))) for p in self._parts)
 
 
+class SpillExceeded(RuntimeError):
+    """A journey needed a latent tick beyond the slice the shard holds.
+
+    Carries the size that would have sufficed, so the caller can re-simulate the
+    slice and re-run the shard. Re-running is byte-identical to having started
+    with the larger allowance: the latent uniforms are keyed by the ABSOLUTE
+    tick and the chain advances from a recorded checkpoint, so a longer slice
+    holds the same values at every tick the shorter one held.
+    """
+
+    def __init__(self, needed_ticks, held_ticks, t0):
+        self.needed_ticks = needed_ticks
+        self.held_ticks = held_ticks
+        self.t0 = t0
+        super().__init__(f"a journey needs latent tick {t0 + needed_ticks - 1} "
+                         f"({needed_ticks} ticks from t0={t0}) but the slice holds {held_ticks}")
+
+
 @dataclass
 class ShardResult:
     shard: int
@@ -280,6 +298,20 @@ class Engine:
 
     def _state_at(self, latents: LatentSlice, tick, op):
         i = tick - latents.t0
+        # `tick` is a vector of ticks, one per request in the group, so the
+        # bounds check is vectorised (np.any also accepts a scalar).
+        n_held = len(latents.intensity)
+        if np.any(i >= n_held):
+            # A journey ran past the latent slice this shard holds. The spill
+            # allowance is a tail heuristic (3x the fitted p99 step gap), not a
+            # bound, so a long enough journey outruns it — seed-dependent, and
+            # likelier the more sessions a rung has. Report exactly how many
+            # ticks are needed so the caller can re-simulate and re-run, rather
+            # than dying in numpy's index check (which is what the s rung did at
+            # seeds 1 and 4 on 2026-09-12: "index 2872 is out of bounds for axis
+            # 0 with size 2839").
+            raise SpillExceeded(needed_ticks=int(np.max(i)) + 1, held_ticks=int(n_held),
+                                t0=int(latents.t0))
         svc_slot = self.slots.svc_slot_of_op[op]
         return (latents.health[i, self.slots.slot_of_op[op]], latents.pool[i, svc_slot], latents.cache[i, svc_slot],
                 latents.load[i, svc_slot], latents.intensity[i])
