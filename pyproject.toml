@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trace-bench"
-version = "0.1.0"
+version = "0.2.0"
 description = "Simulated microservice trace benchmark with ground-truth causal graphs"
 readme = "README.md"
 license = { file = "LICENSE" }
