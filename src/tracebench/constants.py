@@ -72,6 +72,21 @@ SCOPE_INSTANTIATE = 0
 SCOPE_GENERATE = 1
 INSTANTIATE_SHARD = -1
 
+# --- reproducibility ------------------------------------------------------------------
+# Monte-Carlo-derived quantities are rounded to this many decimals before they
+# are stored or used. A float computed through transcendentals is NOT bit-stable
+# across CPU architectures even at identical library versions: on 2026-09-12 one
+# fitted SLOW threshold came out 1 ULP apart on arm64 macOS and x86-64 Linux
+# (0.021847459436795613 vs 0.02184745943679561), which dirtied `instantiation.json`
+# and `slow-thresholds.json` (+ its four view copies) and broke the cross-machine
+# half of PRD scenario 12 while every data file stayed byte-identical. Nine
+# decimals is ~7 orders of magnitude above that noise, one nanosecond on a
+# seconds-valued threshold (records carry milliseconds) and 1e-9 on a
+# probability — below anything the calibration or the outcome classes can see.
+# The `calibration` diagnostics were already rounded (to 6) and were identical
+# across the two architectures, which is what located the gap.
+MC_DECIMALS = 9
+
 # --- PRD-pinned values ---------------------------------------------------------------
 DEFAULT_FLOOR = 0.05
 FLOOR_SWEEP = (0.01, 0.02, 0.05, 0.10, 0.20, 0.50)

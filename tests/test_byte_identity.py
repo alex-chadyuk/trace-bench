@@ -21,9 +21,11 @@ from pathlib import Path
 
 import pytest
 
+from tracebench.constants import MC_DECIMALS
 from tracebench.manifest import corpus_key
 from tracebench.record import read_json
 from corpus_fixture import shipped_xs_pipeline
+from xs_fixture import xs_instantiation
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "xs-checksums.json"
 MANIFEST_DIR_ENV = "TRACEBENCH_XS_MANIFEST_DIR"
@@ -84,3 +86,32 @@ def test_the_fixture_pins_both_variants_of_seed_zero():
     assert set(frozen["corpora"]) == {"xs/latent/seed=0", "xs/twin/seed=0"}
     assert all(len(c["files"]) > 20 and all(len(s) == 64 for s in c["files"].values())
                for c in frozen["corpora"].values())
+
+
+def test_every_monte_carlo_derived_float_is_quantised():
+    """The guard behind D-TB-15: a fitted float that reaches an artifact unrounded
+    is not reproducible across CPU architectures (one SLOW threshold came out 1
+    ULP apart on arm64 and x86-64 on 2026-09-12, while every data file stayed
+    byte-identical). Rounding is what makes it reproducible, so a future change
+    that adds an unrounded fitted quantity fails here rather than a rung later."""
+    inst = xs_instantiation(0)
+    thresholds = inst.latency.thresholds
+    assert thresholds, "the xs instantiation fits no thresholds"
+    unrounded = {k: v for k, v in thresholds.items() if v != round(v, MC_DECIMALS)}
+    assert not unrounded, f"SLOW thresholds not quantised to {MC_DECIMALS} decimals: {unrounded}"
+
+    p_calls = {i: e.p_call for i, e in enumerate(inst.topo.edges)}
+    assert p_calls, "the xs topology has no call edges"
+    unrounded = {k: v for k, v in p_calls.items() if v != round(v, MC_DECIMALS)}
+    assert not unrounded, f"call probabilities not quantised to {MC_DECIMALS} decimals: {unrounded}"
+
+    # and as serialised: the artifacts carry the rounded values, not a longer repr
+    from tracebench.instantiate import instantiation_record
+    from tracebench.latency import slow_thresholds_json
+    rec = instantiation_record(inst)
+    for key, value in rec["latency"]["thresholds_s"].items():
+        assert value == round(value, MC_DECIMALS), f"instantiation.json latency.thresholds_s[{key}]"
+    for row in slow_thresholds_json(inst.latency, inst.topo)["thresholds"]:
+        assert row["threshold_s"] == round(row["threshold_s"], MC_DECIMALS), row["op_id"]
+    for edge in rec["topology"]["edges"]:
+        assert edge["p_call"] == round(edge["p_call"], MC_DECIMALS), edge
