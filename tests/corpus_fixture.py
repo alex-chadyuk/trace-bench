@@ -40,6 +40,30 @@ def xs_corpus(variant="latent", faults=True, tag="base"):
     return Path(res["corpus_dir"])
 
 
+@functools.lru_cache(maxsize=None)
+def shipped_xs_pipeline():
+    """One `pipeline` run of the SHIPPED `configs/instances/xs.yaml` at seed 0,
+    both variants, with the upload stubbed — `(out_dir, results, upload_calls)`.
+
+    Shared by the pipeline and byte-identity tests: the byte-identity fixture is
+    frozen from the shipped configuration, and `config_hash` covers the
+    `constants` field as written there, so a rewritten copy of the config (what
+    `xs_corpus` uses) would hash differently.
+    """
+    from tracebench.pipeline import run_pipeline
+
+    out = _ROOT / "shipped-xs"
+    calls = []
+
+    def stub_upload(corpora, **kw):
+        calls.append({"corpora": [str(c) for c in corpora], **{k: str(v) for k, v in kw.items()}})
+        return {"dry_run": False, "repo": kw.get("repo"), "corpora": [str(c) for c in corpora]}
+
+    res = run_pipeline(XS, [0], out, upload_to="chadyuk/trace-bench",
+                       stage_dir=_ROOT / "shipped-xs-stage", upload_fn=stub_upload)
+    return out, res, calls
+
+
 def corpus_checksums(corpus_dir, exclude_prefixes=("run/",)):
     corpus_dir = Path(corpus_dir)
     out = {}

@@ -216,6 +216,39 @@ def verify(corpus_dir, denylist=None):
             "name_problems": name_problems, "records_scanned": scanned, "denylist_used": bool(denylist)}
 
 
+# --- frozen checksums ---------------------------------------------------------------------
+CHECKSUMS_SCHEMA = "tracebench/checksums@1"
+
+
+def corpus_key(m):
+    """`<instance>/<variant>/seed=<seed>` — a corpus's identity, independent of
+    where it was generated."""
+    return f"{m['instance']}/{m['variant']}/seed={m['seed']}"
+
+
+def freeze_checksums(corpora):
+    """The per-file sha256 of one or more corpora, as the committed fixture that
+    pins byte-identical regeneration across machines (PRD scenario 12).
+
+    Every corpus must be at the same tool and constants version: a fixture that
+    mixed versions would pin nothing.
+    """
+    manifests = [read_json(Path(c) / MANIFEST_JSON) for c in corpora]
+    if not manifests:
+        raise ValueError("no corpora to freeze")
+    versions = {(m["tool_version"], m["constants_version"], m["numpy_minor"]) for m in manifests}
+    if len(versions) != 1:
+        raise ValueError(f"corpora span several versions: {sorted(versions)}")
+    tool_version, constants_version, numpy_minor = versions.pop()
+    return {
+        "schema": CHECKSUMS_SCHEMA, "tool_version": tool_version, "constants_version": constants_version,
+        "numpy_minor": numpy_minor,
+        "corpora": {corpus_key(m): {"config_hash": m["config_hash"],
+                                    "files": {f["path"]: f["sha256"] for f in m["files"]}}
+                    for m in manifests},
+    }
+
+
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -225,6 +258,9 @@ def build_parser():
     v = sub.add_parser("verify", help="re-check a corpus against its manifest and the public name grammar")
     v.add_argument("--corpus", required=True)
     v.add_argument("--denylist", default=None, help="private JSON {names: [...]} of real names that must not appear")
+    f = sub.add_parser("freeze", help="write the committed per-file checksum fixture for one or more corpora")
+    f.add_argument("--corpus", action="append", required=True, help="a corpus directory with a manifest (repeatable)")
+    f.add_argument("--out", required=True, help="fixture path, e.g. tests/fixtures/xs-checksums.json")
     return p
 
 
@@ -235,6 +271,17 @@ def main(argv=None):
         m = write_manifest(args.corpus, args.label)
         rec.finish({"n_files": len(m["files"]), "alphabet_size_realized_train": m["alphabet_size_realized_train"]})
         log({"event": "manifest", "n_files": len(m["files"])})
+        return 0
+    if args.cmd == "freeze":
+        try:
+            frozen = freeze_checksums(args.corpus)
+        except ValueError as e:
+            log({"event": "freeze_refused", "reason": str(e)})
+            return 3
+        write_json(args.out, frozen)
+        log({"event": "freeze", "out": args.out, "tool_version": frozen["tool_version"],
+             "corpora": sorted(frozen["corpora"]),
+             "n_files": {k: len(v["files"]) for k, v in sorted(frozen["corpora"].items())}})
         return 0
     res = verify(args.corpus, args.denylist)
     log({"event": "verify", **{k: v for k, v in res.items() if not k.endswith("problems")}})
