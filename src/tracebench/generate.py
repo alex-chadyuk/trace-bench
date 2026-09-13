@@ -20,7 +20,6 @@ The correlated views are produced by `python -m tracebench.correlate`.
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 from pathlib import Path
 
 import numpy as np
@@ -159,9 +158,12 @@ def generate(config_path, seed, out, twin=False, override_cap=False, resume=Fals
     rec = RunRecord(corpus_dir, "generate", {"config": str(config_path), "seed": seed, "out": str(out), "twin": twin,
                                              "override_cap": override_cap, "resume": resume,
                                              "stop_after_shard": stop_after_shard, "workers": workers})
-    today = dt.date.today().isoformat()
+    # The call-graph artifact's `derived` date is the simulated window's start
+    # date, a function of the configuration alone — not the wall clock, which
+    # made a corpus regenerated on another day differ by one file (D-TB-18).
+    derived = cfg.run.window.start[:10]
     # 2. instantiation record
-    write_instantiation(inst, corpus_dir, today)
+    write_instantiation(inst, corpus_dir, derived)
     # 3. size estimate and cap
     est = estimate_size(inst)
     est["alphabet"] = alphabet_estimate(inst)

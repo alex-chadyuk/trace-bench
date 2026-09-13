@@ -115,3 +115,21 @@ def test_every_monte_carlo_derived_float_is_quantised():
         assert row["threshold_s"] == round(row["threshold_s"], MC_DECIMALS), row["op_id"]
     for edge in rec["topology"]["edges"]:
         assert edge["p_call"] == round(edge["p_call"], MC_DECIMALS), edge
+
+
+def test_the_corpus_carries_no_wall_clock_date():
+    """The guard behind D-TB-18: `topology/callgraph.json` is dated by the
+    simulated window's start, a function of the configuration, never by the day
+    the corpus was generated — the latter made the same configuration and seed
+    regenerate differently on any day but the freeze day."""
+    import datetime as dt
+    import yaml
+
+    from xs_fixture import XS
+
+    out, _res, _calls = shipped_xs_pipeline()
+    window_start = yaml.safe_load(XS.read_text())["run"]["window"]["start"]
+    for corpus in sorted(Path(out).glob("xs/*/seed=0")):
+        cg = read_json(corpus / "topology" / "callgraph.json")
+        assert cg["derived"] == window_start[:10], corpus
+        assert cg["derived"] != dt.date.today().isoformat() or window_start[:10] == dt.date.today().isoformat()
