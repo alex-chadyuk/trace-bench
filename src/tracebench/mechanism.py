@@ -114,6 +114,25 @@ class Node:
         the plain conditional otherwise."""
         if not self.var.lag_self:
             return self.dist(ctx)
+        # Memoised per held context (D-TB-17). The projection asks for the same
+        # (node, context) once per particle of every effect that passes through
+        # the node — 11 M requests for 255 k distinct contexts at m — and each
+        # cold evaluation is a power iteration to 1e-13. The same function on
+        # the same inputs, so the cache changes no byte; the cached array is
+        # read-only so no caller can alter it in place.
+        try:
+            key = tuple(sorted(ctx.items()))
+        except TypeError:
+            return self._held(ctx)
+        cache = self.__dict__.setdefault("_held_cache", {})
+        out = cache.get(key)
+        if out is None:
+            out = self._held(ctx)
+            out.flags.writeable = False
+            cache[key] = out
+        return out
+
+    def _held(self, ctx):
         values = self.var.values
         n = len(values)
         K = np.zeros((n, n))
