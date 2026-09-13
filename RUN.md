@@ -290,6 +290,65 @@ the specification; this file records the implementation's departures from it.
     traceback line by line as `pipeline_traceback` events before the step
     record.
 
+- **D-TB-17 — held distributions are memoised; the latent projection was the
+  ladder's long pole (2026-09-13).** The v0.2.2 ladder lost four of the five
+  `m` jobs and all five `l` jobs to the 12-hour runtime cap without a single
+  shard emitted. The `m` job that finished (seed 3, 37,142 s) spent
+  **6 h 19 min between the size estimate and the `graphs` event** — inside
+  `write_graph_artifacts`, on one core — before its 192 shards took 1.5 h;
+  the other four `m` boxes were still in that phase after 11 h 55 min and the
+  five `l` boxes after 9.7 h.
+  - *Cause.* `Projector.effect` marginalises the latent intermediates by
+    frontier-merged enumeration and asks `Node.dist_held` for the child's
+    distribution under every particle's held context. For a lag-1 state
+    variable that is the stationary distribution of its tick chain, found by a
+    power iteration to 1e-13 — and it was recomputed on every request: 593,683
+    iterations in the first fifteen minutes of a local profile, 94 % of the
+    time. The requests repeat a few hundred thousand distinct contexts (m seed
+    3: 11.1 M requests for 255 k contexts; seed 0: 24.8 M for 299 k — the
+    per-seed spread that let seed 3 finish and not the others).
+    `bidirected_groups` carries almost all of it; the directed pass and the
+    twin are cheap.
+  - *Fix.* `dist_held` memoises per `(node, held context)` and hands out a
+    read-only array. The same function on the same inputs. Measured locally
+    (Apple silicon): `s` latent 37.5 s → 4.2 s; `m` latent seed 3 181.7 s and
+    seed 0 275.2 s against 6.3 h and > 11.9 h on the cloud box; `m` twin seed 3
+    31.3 s. `stationary` runs 5,938 times per `m` variant instead of millions.
+  - *Byte identity.* `s` seed 0, latent and twin: `graphs/` identical to the
+    uncached code (`diff -r`). All 8 + 8 `graphs/` files of the published
+    `m/latent/seed=3` and `m/twin/seed=3` reproduce with the sha256 their
+    manifests record. `xs` seed 0 at 0.2.3 differs from the 0.2.2 fixture in
+    `instantiation.json` (the tool version) and in `topology/callgraph.json`,
+    the latter for an unrelated reason (D-TB-18). `config_hash` is unchanged;
+    corpora generated at 0.2.1 and 0.2.2 stay valid and are not re-run.
+  - *Cost of the miss.* About 108 box-hours. The per-rung wall-clock estimates
+    were extrapolated from emission timing at `s`, where the projection takes
+    two minutes; it was never timed above `s`. Same lesson as D-TB-13 and
+    D-TB-16: prototype every phase on every rung.
+  - *Work count by rung* (`effect` calls, by graph traversal): xs 2.5 k, s
+    9.7 k, m 90–99 k across seeds, l 273 k, xl 715 k. Projected for the cloud
+    box with the cache: m ≈ 10 min, l ≈ 0.5–1 h, xl ≈ 1.5–3 h in this phase.
+  - *Guard.* `tests/test_mechanism.py::test_held_distributions_are_memoised_and_identical_to_a_cold_evaluation`
+    — repeats are served without a `stationary` call and equal a cold
+    evaluation exactly.
+
+- **D-TB-18 — the call-graph artifact is dated by the simulated window, not
+  the wall clock (2026-09-13).** `topology/callgraph.json` follows the lab's
+  CallGraphTruth shape, whose `derived` field is a date; `generate` filled it
+  with the day the corpus was generated. A corpus therefore regenerated on a
+  different day differs in that one file, which contradicts PRD scenario 12 —
+  the xs checksum fixture only passed because it was frozen and checked on the
+  day it was made — and the published latent/twin pairs of `s` seeds 1 and 4
+  and `m` seed 3 already carry different dates (their latent instance was
+  generated before midnight UTC, the twin after). Found while checking the
+  0.2.3 regeneration against the 0.2.2 fixture. The consumer of the artifact
+  (`CallGraphTruth.from_json`) never reads the field. From 0.2.3 `derived` is
+  the start date of the configured simulation window (the date the deployment
+  topology is "as of"), a function of the configuration alone. Owner decision
+  2026-09-13. The 22 corpora already published keep their calendar dates and
+  are not re-run; a regeneration of any of them at 0.2.3 differs from the
+  published bytes in `instantiation.json` and this field only.
+
 ## Implementation notes (not deviations)
 
 - **Every operation lies on a journey.** The topology sampler attaches an
@@ -369,7 +428,7 @@ the specification; this file records the implementation's departures from it.
   private is compiled into the module: the denylist path, the staging directory
   and the dataset repository are arguments.
 - **The xs checksum fixture** (`tests/fixtures/xs-checksums.json`, re-frozen
-  2026-09-12 at tool version 0.2.2 for D-TB-16) pins the per-file sha256 of
+  2026-09-13 at tool version 0.2.3 for D-TB-17/18) pins the per-file sha256 of
   `xs/{latent,twin}/seed=0` — 70 and 74 files — generated from the shipped
   `configs/instances/xs.yaml`. The configuration path matters: `config_hash`
   covers the `constants` field as written in the file, so a rewritten copy of
@@ -453,3 +512,8 @@ the specification; this file records the implementation's departures from it.
 | 2026-09-12 | s | latent + twin | 0, 2, 3 | `python -m tracebench.pipeline --config configs/instances/s.yaml --seeds <k> --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 2 corpora per job, 5 steps ok each. Wall clock per job 7,656–8,622 s (2.1–2.4 h): generate ≈ 3,778–4,218 s per corpus, verify only ~21 s, upload 64–297 s. 96 shards, realised alphabet 322 of 323 potential, identical `config_hash` across seeds. `verify` manifest, names and private denylist clean. **2.3× the plan's ≈ 1 h estimate** — EC2 is slower than the local Apple-silicon timing the estimate came from, and emission is single-core-bound; re-estimates m ≈ 4.6 h, l ≈ 6.9 h, xl ≈ 14–23 h against caps of 12 h and 36 h. |
 | 2026-09-12 | s | latent | 1, 4 | same as above, `--seeds 1` / `--seeds 4` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **FAILED at shard 15 (both) and shard 28 (seed 1)** after 852 s and 906 s: `IndexError ... size 2839` — the spill allowance, see **D-TB-16**. Nothing was uploaded; the partial corpora reached the object store without a `COMPLETE` marker (196 and 202 objects), so they cannot be mistaken for whole ones. To be re-run at 0.2.2. |
 | 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.2 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 47 s; `verify` manifest, names and denylist clean. **Re-freeze source of `tests/fixtures/xs-checksums.json` after D-TB-16**; only `instantiation.json` differs from the 0.2.1 corpus (it records `tool_version`), `config_hash` unchanged. |
+| 2026-09-12/13 | s | latent + twin | 1, 4 | `python -m tracebench.pipeline --config configs/instances/s.yaml --seeds <k> --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete (the D-TB-16 re-runs): seed 1 9,528 s (generate 4,749 / 4,670 s, verify 23 / 24 s, upload 62 s); seed 4 10,424 s (5,223 / 5,076 s, 23 / 25 s, 77 s). Spill retries, one attempt each and identical in both variants: shard 15 needed 2,873 (seed 1) / 2,846 (seed 4) ticks against 2,839 held, shard 28 needed 3,375 (seed 1), and shard 87 needed 3,036 (seed 4 — a shard the 0.2.1 run never reached). 96 shards, realised alphabet 322 of 323, `config_hash` identical to seeds 0, 2, 3; `verify` manifest, names and private denylist clean; published to the dataset host and written back under the versioned prefix. **The `s` rung is complete: 10 of 10.** |
+| 2026-09-12/13 | m | latent + twin | 3 | same shape, `--config configs/instances/m.yaml --seeds 3` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: **37,142 s (10.3 h)** — latent generate 29,656 s, of which 6 h 19 min passed before the first shard (**D-TB-17**), twin generate 7,241 s (its projection 2.5 min), verify 28 / 29 s, upload 188 s (13.4 GB, 2,856 files). 192 shards, realised alphabet 2,650 of 2,661 (the estimator expected 1,585), `config_hash d72cb6a3…`; request target 26,995 directed / 775,455 bidirected (24,633 / 13,470 at the floor), session 27,393 / 1,560,908; correlator unattributed 2.4 %, session Jaccard 1.00 over 694,444 sessions; `verify` clean; published and written back. |
+| 2026-09-12/13 | m | latent | 0, 1, 2, 4 | same shape, `--seeds <k>` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **TERMINATED by the 12-hour runtime cap** (2026-09-13 11:18–11:20 UTC) still inside the latent projection: the log ends at the size estimate, no `graphs` event in 11 h 55 min, one of eight vCPUs busy throughout. Nothing synced to the object store, nothing uploaded. See D-TB-17; to be re-run at 0.2.3. |
+| 2026-09-13 | l | latent | 0–4 | same shape, `--config configs/instances/l.yaml --seeds <k>` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **DESTROYED by the owner after 9.7 h** (11:31 UTC), all five still inside the latent projection at 2.9× the `m` work — they could not have finished inside the cap. Nothing synced, nothing uploaded. See D-TB-17; to be re-run at 0.2.3. |
+| 2026-09-13 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.3 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 43 s; `verify` manifest, names and denylist clean. Against the 0.2.2 fixture, `instantiation.json` (tool version) and `topology/callgraph.json` (`derived` now `2026-01-05`, D-TB-18) differ; every other file, `config_hash` included, is identical. **Re-freeze source of `tests/fixtures/xs-checksums.json` at 0.2.3** (70 / 74 files). |

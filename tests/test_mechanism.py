@@ -156,3 +156,39 @@ def test_regimes_emit_one_graph_each_with_changepoints(tmp_path):
     assert changed and all({"src", "dst", "before", "after"} <= set(c) for c in changed)
     # the base regime graph equals the unscheduled graph (same topology, same seed)
     assert graphs[0][1]["edges"] == write_mechanism_graphs(base, tmp_path / "c")[0][1]["edges"]
+
+
+def test_held_distributions_are_memoised_and_identical_to_a_cold_evaluation(monkeypatch):
+    """The guard behind D-TB-17: the projection asks `dist_held` for the same
+    (node, held context) once per particle, and a cold evaluation is a power
+    iteration to 1e-13 — 6 h of the 10 h m job on 2026-09-13, and the whole 12 h
+    cap on the other four. The cache must serve repeats without recomputing and
+    must return exactly what a cold evaluation returns, or a corpus byte moves."""
+    import tracebench.mechanism as M
+
+    inst = xs_instantiation()
+    mech = inst.mechanism
+    lagged = [n for n in mech.nodes.values() if n.var.lag_self]
+    assert lagged, "xs has no lag-1 state variables"
+    calls = {"n": 0}
+    cold = M.stationary
+
+    def counting(K, *a, **k):
+        calls["n"] += 1
+        return cold(K, *a, **k)
+
+    monkeypatch.setattr(M, "stationary", counting)
+    for node in lagged[:24]:
+        node.__dict__.pop("_held_cache", None)
+        ctx = node.nominal_context(mech)
+        first = node.dist_held(mech, ctx)
+        after_first = calls["n"]
+        assert after_first >= 1
+        again = node.dist_held(mech, dict(ctx))          # an equal context, not the same dict
+        assert calls["n"] == after_first, node.var.id      # served from the cache
+        assert again is first and not again.flags.writeable
+        node.__dict__.pop("_held_cache", None)
+        fresh = node.dist_held(mech, ctx)                  # cold again
+        assert calls["n"] == after_first + 1
+        assert np.array_equal(fresh, first) and fresh.dtype == first.dtype, node.var.id
+        assert abs(float(first.sum()) - 1.0) < 1e-12

@@ -14,7 +14,7 @@
     "graphs/scoring-target.json": "a96c424c3d58ee9316f37ae968f3d7e533776cfae3aa129ac3e4d996d109782b",
     "graphs/views/endpoint.json": "5670fc0e69887a5b4a956f0c0a37fce5acb4860f06d6364ccaea7748c60f89a9",
     "graphs/views/service.json": "fe9d001135c157376246f9fbd0c37a52ddb9b6ecf6e918d85e77b26a537fd3d7",
-    "instantiation.json": "a728de2e249ba80fe1904e97729ca4420c1b14df710d4e032521599bfa90b2e5",
+    "instantiation.json": "5eb74925e3f4c27b59c075199b03b92650b8285559a4e1d08fe98764c5391a32",
     "labels/cases.json": "850f524d2f06ecd90961eb5fb024f12a5516d20e203d475ffad5d9eaf991931c",
     "labels/faults.json": "6e5c816f57fb391545ba6ee7c17fb2f791f8ecbc64252879828415a357b0e429",
     "labels/sequence-labels.parquet": "8de3465895e7566d5fe05148ca8328fcc0804e5fb1079733ae6e98cfd2a5990b",
@@ -44,7 +44,7 @@
     "raw/shard=0003/vl.jsonl.gz": "993daed420e90fa53cb5a66481ff7a48564fb908ca4041e9a93efbdd29c28788",
     "reports/correlation-report.json": "06b053f3d3f0ac47b4eaafd905f9b234212e131bc8dfcb898bb905e5322f81c7",
     "slow-thresholds.json": "7a4cbb849ea88532b9b0a4ba5ee62df5216a7ef7351379ffe3159d4961a30204",
-    "topology/callgraph.json": "5eee93a7cc40b308e141f3df178d441551480d18a8b4ba92900253b8e0780da9",
+    "topology/callgraph.json": "7893f2b98306e26f70aa41d912d62582ae5ef09ffb0a6c700fcf2e794a655383",
     "topology/prior.json": "527276708e9607a176061b7eeb74a9bb33dffd6bff9da1a6c00d306283814231",
     "views/end-request/export-stats.json": "5438fc6089861b98bfd832486b09ddbbe77d1b2bf8f6e2eb3e37058b1e996043",
     "views/end-request/model-vocab.json": "fa68de74695f7f40eae065bc32db80f18e4d1f42554eb504e8192c3018556ecc",
@@ -89,7 +89,7 @@
     "graphs/scoring-target.json": "370506c46993076e319c41d7b3df438ed1b4d0405ffd23e8266e2459eefddeb0",
     "graphs/views/endpoint.json": "ba2874f78859054bb4a6ab8fb28c40bb141a60e0ab6a178fdfa401742c4374df",
     "graphs/views/service.json": "2b7d68b1430b25bcc7e90845fee856517ae7de0e3b9aa0ba2130593707a171bc",
-    "instantiation.json": "a728de2e249ba80fe1904e97729ca4420c1b14df710d4e032521599bfa90b2e5",
+    "instantiation.json": "5eb74925e3f4c27b59c075199b03b92650b8285559a4e1d08fe98764c5391a32",
     "labels/cases.json": "850f524d2f06ecd90961eb5fb024f12a5516d20e203d475ffad5d9eaf991931c",
     "labels/faults.json": "6e5c816f57fb391545ba6ee7c17fb2f791f8ecbc64252879828415a357b0e429",
     "labels/sequence-labels.parquet": "8de3465895e7566d5fe05148ca8328fcc0804e5fb1079733ae6e98cfd2a5990b",
@@ -123,7 +123,7 @@
     "raw/shard=0003/vl.jsonl.gz": "dc15fe88c698f9ce6621afad8151872e9d6f0846f9e8cc1336a4fe2865a0de8f",
     "reports/correlation-report.json": "06b053f3d3f0ac47b4eaafd905f9b234212e131bc8dfcb898bb905e5322f81c7",
     "slow-thresholds.json": "7a4cbb849ea88532b9b0a4ba5ee62df5216a7ef7351379ffe3159d4961a30204",
-    "topology/callgraph.json": "5eee93a7cc40b308e141f3df178d441551480d18a8b4ba92900253b8e0780da9",
+    "topology/callgraph.json": "7893f2b98306e26f70aa41d912d62582ae5ef09ffb0a6c700fcf2e794a655383",
     "topology/prior.json": "527276708e9607a176061b7eeb74a9bb33dffd6bff9da1a6c00d306283814231",
     "views/end-request/export-stats.json": "5438fc6089861b98bfd832486b09ddbbe77d1b2bf8f6e2eb3e37058b1e996043",
     "views/end-request/model-vocab.json": "fa68de74695f7f40eae065bc32db80f18e4d1f42554eb504e8192c3018556ecc",
@@ -158,5 +158,5 @@
  },
  "numpy_minor": "2.4",
  "schema": "tracebench/checksums@1",
- "tool_version": "0.2.2"
+ "tool_version": "0.2.3"
 }
