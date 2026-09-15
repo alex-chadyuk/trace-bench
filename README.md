@@ -18,7 +18,9 @@ suite (`pytest tests/ -m "not slow"`). Byte-identical regeneration of the `xs`
 rung is pinned by a committed checksum fixture
 (`tests/fixtures/xs-checksums.json`); the corpora of the other rungs are
 generated per (rung, seed) and published to the dataset host with the two
-commands below. The package name is `tracebench`; every command runs as
+commands below. Scoring-target strengths are exact marginalisations where the
+projection's frontier fits the tool's particle cap and counter-keyed
+Monte-Carlo estimates above it, flagged per edge (`RUN.md`, D-TB-19). The package name is `tracebench`; every command runs as
 `python -m tracebench.<command>`:
 
 | command | what it does |

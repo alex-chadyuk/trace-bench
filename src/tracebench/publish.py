@@ -75,12 +75,20 @@ seed, tool version and constants version (see each `manifest.json`).
 Generator (MIT): https://github.com/alex-chadyuk/trace-bench — tool version {tool_version}.
 Corpus licence: CC BY 4.0. Fitted realism constants: {constants}.
 
-| instance | variant | seed | alphabet (realized, train) | mechanism nodes | directed / bidirected at floor |
-|---|---|---|---|---|---|
+| instance | variant | seed | alphabet (realized, train) | mechanism nodes | directed / bidirected at floor | edges on a Monte-Carlo estimate (max SE) |
+|---|---|---|---|---|---|---|
 {rows}
 
 To score a method: read only `raw/` and `views/`; score against
 `graphs/scoring-target.json` (request grain) with `python -m tracebench.score`.
+
+Scoring-target strengths are exact marginalisations of the mechanism, except
+where the exact frontier of one (source, destination) chain exceeds the tool's
+particle cap: those effects are counter-keyed Monte-Carlo estimates with common
+random numbers (the sample count and the largest standard error are recorded
+per edge as `mc: {{n, se}}` and per target as `n_effects_mc` / `mc_se_max`).
+The last column counts the request-grain edges that carry the flag; a reader
+who wants only exact strengths can drop them. The scorer reads strengths only.
 
 The dataset viewer is disabled: a corpus is a tree of gzipped JSON lines and
 parquet files with several schemas, not one table.
@@ -89,7 +97,11 @@ parquet files with several schemas, not one table.
 
 def _row(m):
     tc = m.get("target_counts") or {}
-    return f"| {m['instance']} | {m['variant']} | {m['seed']} | {m.get('alphabet_size_realized_train')} | {m.get('n_nodes_mechanism')} | {tc.get('n_directed_at_floor')} / {tc.get('n_bidirected_at_floor')} |"
+    if tc.get("n_directed_mc") is None:
+        mc = "n/a"
+    else:
+        mc = f"{tc['n_directed_mc']} / {tc['n_bidirected_mc']} ({tc.get('mc_se_max')})"
+    return f"| {m['instance']} | {m['variant']} | {m['seed']} | {m.get('alphabet_size_realized_train')} | {m.get('n_nodes_mechanism')} | {tc.get('n_directed_at_floor')} / {tc.get('n_bidirected_at_floor')} | {mc} |"
 
 
 def path_in_repo(manifest):

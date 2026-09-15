@@ -66,10 +66,10 @@ the specification; this file records the implementation's departures from it.
   Token pairs whose operations can never share a request tree (request grain)
   or a journey (session grain) are outside the scoring universe; without this
   the daily-intensity latent alone would make every pair of slow tokens a
-  bidirected edge. The request-grain target is acyclic by construction; the
-  session-grain target adds journey edges and may be cyclic at the type
-  level, in which case the causal-validity axis is not applicable for the
-  charter's cyclicity reason. Within-operation token pairs (retries) are
+  bidirected edge. The request-grain target is acyclic by the request-grain
+  through-set (only within-request paths, D-TB-19); the session-grain target
+  adds journey edges and may be cyclic at the type level, in which case the
+  causal-validity axis is not applicable for the charter's cyclicity reason. Within-operation token pairs (retries) are
   recorded as `retry_pairs` and never scored.
 - **D-TB-11 — degraded and exhausted states are explicit outcome shares.**
   `error_shift.degraded` / `error_shift.pool_exhausted` are probability maps
@@ -349,6 +349,183 @@ the specification; this file records the implementation's departures from it.
   are not re-run; a regeneration of any of them at 0.2.3 differs from the
   published bytes in `instantiation.json` and this field only.
 
+- **D-TB-19 — the projection's chain order was not topological; the
+  intermediates are now enumerated per pair in a topological order, the
+  request grain excludes cross-request paths, and the exact enumeration runs
+  under a particle cap with a counter-keyed Monte-Carlo fallback (2026-09-15).**
+  Found by the in-depth analysis of 2026-09-13 (plan
+  `meta/plans/2026-09-13-trace-bench-projection-analysis-plan.md` in the
+  workspace) after m-s4 died of memory and m-s1 / l ×5 never left the
+  projection at 0.2.3. Owner decisions 2026-09-15 (Q1–Q6 of that plan).
+  - *The bug.* `Projector.effect` enumerated the through-node chain of a pair
+    in `mech.order`, the construction order, which builds backend ops deepest
+    first; invocation edges run `I:caller → I:callee`, so every `I:callee`
+    preceded its callers and, taking a not-yet-assigned parent at its nominal
+    context (`absent`), became absent with probability 1. Every dependence
+    through more than one invocation hop was silently dropped, which is also
+    why the shipped chains were cheap. Measured at seed 0 with the order fixed
+    and nothing else (D-TB-20 off): `xs` request grain — 520 directed edges
+    unchanged to the last digit, bidirected 915 → 1,865 (108 → 111 at the
+    floor; 204 strengths move, at most 0.013); `xs` session grain — directed
+    604 → 1,300 (540 → 717 at the floor: 100 BFF→service, 15 BFF→external, 54
+    client→service, 8 client→external edges the shipped targets never had,
+    although D-TB-10 promised the journey edges). `s` request grain — 2,310
+    directed unchanged, bidirected 16,896 → 20,093 (754 → 796; 8,472 move, at
+    most **0.289**, 28 across the floor, 114 vanish); `s` session grain —
+    directed 2,506 → 5,496 (2,260 → 2,726). Every one of the 26 corpora
+    published at 0.2.1–0.2.3 carries a wrong scoring target; their emitted
+    data, oracle, views, labels, mechanism graph and alphabet are unaffected.
+  - *The order.* The mechanism is cyclic at the type level (`I:v` is one
+    node per op, shared by every journey step that reaches v, and a journey
+    feeds the next step's invocation), so no global topological order
+    exists; but every such cycle passes a token node, and token nodes are
+    never through nodes, so each per-pair chain is acyclic. `Projector.chain_order`
+    orders the chain greedily — at each step the ready node whose processing
+    grows the held frontier least, the ratio of the value count it adds to
+    the value counts it releases compared as an exact rational, ties by
+    construction position — and raises on a cycle. `mech.order` and the
+    mechanism graph are untouched.
+  - *The grain rule (Q1).* With the order fixed and the whole derived set as
+    through nodes, the request-grain target turns cyclic at the floor,
+    because `T:bff:c:j:0 → I:bff:c:j:1 → …` (a client retry re-invoking the
+    BFF) and `C:c:j:F → I:bff:c:j+1:0 → …` (a step gating the next) are
+    cross-request paths the shipped code excluded by accident. At the
+    **request grain the BFF invocation variables `I:bff:*` are not through
+    nodes**: the directed set equals the 0.2.3 one exactly (pinned by
+    `tests/fixtures/xs-request-directed-0.2.3.json`) and the target is
+    acyclic at every floor by that rule, not by construction. At the
+    **session grain they are**, which adds the journey and client-retry edges
+    and may make the type-level target cyclic, as D-TB-10 allows. Bidirected
+    groups are grain-independent (no latent path crosses a token node) and are
+    computed once; directed edges per grain, each with its own `retry_pairs`.
+  - *Why exactness needs a budget.* For `intensity → A:v:0` with v the
+    external operation (m 548, l 1572, xl 4330 at seed 0) the frontier holds
+    the joint cache and load state of every service on a path, bounded by
+    10^12–10^19 particles at m, 10^50 at l, 10^143 at xl; the only hard factor
+    is P(I:v present | do(src)), the s–t reliability of a layered network with
+    independent edge failures, #P-complete (pathwidth 35–471). The token
+    deltas behind it are 0.03–0.07 at m/l, at and above the floor, so bounds,
+    truncation or holes would misstate the target (options (b), (e), (f) of the
+    plan, rejected; treating intensity as observed, option (c), rejected — Q5).
+  - *The enumerator.* `_effect_exact` holds the frontier as an int8 matrix
+    (one column per held variable) and a float64 weight vector; a step
+    evaluates the node per distinct assigned context (invocation nodes by
+    their noisy-OR in closed form, the same product in the same order as
+    `invoke_fn`), expands each particle by the node's values, prunes mass at
+    or below 1e-10, projects onto the variables later nodes still need and
+    merges equal rows — a mixed-radix integer key where the joint value count
+    fits 62 bits, row-unique otherwise, weights summed sequentially. Memory
+    is a few dozen bytes per particle against ≈ 8 KB for the 0.2.x
+    dictionary of frozensets; at `m` seed 4 and the same cap it is 17× faster
+    (112 s against 1,876 s) with the identical fallback set, and it
+    reproduces the dictionary form on every `xs`/`s` target to the last
+    stored digit (raw deltas within 2.2e-16; the per-particle form stays in
+    the tests as `effect_exact_reference`). Above `PROJECTION_CAP_PARTICLES`
+    in one merged frontier the effect is instead estimated by
+    `_effect_mc`: `PROJECTION_MC_N` forward samples of the same chain whose
+    uniforms are `hashing.uniforms(seed, D_PROJECTION, pair, sample, step)`
+    — a pure function of the pair and the coordinates, hence the same draws
+    for every value of the source (common random numbers) and independent of
+    call order, cap and platform — the last node exact given its sampled
+    parents, rounded at `MC_DECIMALS`. Particle counts are integer functions
+    of the tables and the prune, so the fallback decision is the same on
+    every machine. Agreement of the estimator with the exact value on the
+    longest `xs`/`s` chains: within 0.012 at n = 4,000 (standard error 0.007).
+  - *Disclosure.* Every directed edge and bidirected pair whose strength
+    rests on an estimate carries `mc: {n, se}` (`se` the largest standard
+    error over the effects behind it); each group lists its estimated tokens
+    under `mc`; every target header carries `projection_cap`, `mc_n`,
+    `n_effects_exact`, `n_effects_mc`, `mc_se_max`, `n_directed_mc`,
+    `n_bidirected_mc`, which the manifest's `target_counts` and the dataset
+    card repeat. The scorer, the floor sweep and the views read strengths
+    only.
+  - *Measured (step 0 of the plan; local Apple silicon, one core, both
+    grains, N = 40,000; "dict" is the 0.2.x per-particle enumeration with
+    the corrected order, "matrix" the shipped one):*
+
+    | rung, seed | enumerator, cap | projection wall | effects by MC (pairs) | peak RSS | largest SE |
+    |---|---|---|---|---|---|
+    | m 0 | dict, 5×10^5 | 1,057 s | 7 (4) | 3.15 GB | — |
+    | m 4 | dict, 5×10^5 | 1,876 s | 31 (14) | 3.94 GB | 0.0025 |
+    | m 4 | dict, 1×10^5 | 370 s | 55 (22) | 0.96 GB | 0.0025 |
+    | l 0 | dict, 5×10^5 | 5,886 s | 30 (20) | 3.84 GB | 0.0025 |
+    | xl 0 | dict, 5×10^5 | 6,623 s | 17 (11) | 4.55 GB | 0.0024 |
+    | m 4 | matrix, 5×10^5 | 112 s | 31 (14) | 0.66 GB | 0.0025 |
+    | m 0 | matrix, 5×10^6 | 137 s | 1 (1) | 1.41 GB | 0.0025 |
+    | m 4 | matrix, 5×10^6 | 302 s | 5 (3) | 1.75 GB | 0.0021 |
+    | l 0 | matrix, 5×10^6 | 2,120 s | 8 (3) | 2.41 GB | 0.0025 |
+    | xl 0 | matrix, 5×10^6 | 1,756 s | 8 (3) | 2.21 GB | 0.0024 |
+
+    With the dictionary form the exact pass, not the Monte Carlo (0.4 s per
+    effect), was the cost — the largest sub-cap frontiers and the capped
+    attempts — and `l` would have sat at the 12-hour cap (≈ 3.8 h of
+    projection on the box, 2.3× local, on top of 7–8 h of emission). **Shipped:
+    cap 5×10^6, N = 40,000** (constants of the tool version, Q2; `config_hash`
+    unchanged). Fallback pairs at that cap: the external operation's first
+    attempt from `intensity`, `load:0` and `cache:0` at every rung, plus two
+    service ops at `m` seed 4. Projected for the box: `m` 5–12 min, `l` ≈ 1.4 h,
+    `xl` ≈ 1.1 h in this phase; RSS well under the 32 GB before the shard pool
+    forks. The chain order costs ≈ 1 s per rung.
+  - *Release (Q3, Q6).* Tool version **0.3.0**; every corpus regenerates
+    (xs-all, s ×5, m ×5, l ×5, xl ×5) so the release carries one tool
+    version; the 26 corpora published at 0.2.1–0.2.3 are deleted from the
+    host first, as for 0.2.0, and stay in the private object store. m-s1
+    destroyed by the owner. Against the 0.2.3 fixture, `xs` seed 0 moves in
+    exactly seven files per variant — `graphs/scoring-target.json`,
+    `graphs/scoring-target-session.json`, `graphs/floor-sensitivity.json`,
+    `graphs/views/{endpoint,service}.json`, `graphs/mechanism-graph.json`
+    (D-TB-20) and `instantiation.json` (the version) — every data file is
+    byte-identical; the fixture is re-frozen at 0.3.0.
+  - *Guards.* `tests/test_projection.py`: `test_chain_order_is_topological`
+    (every chain of every pair at `xs` and `s`, both grains),
+    `test_request_grain_excludes_cross_request_paths`,
+    `test_session_grain_has_journey_edges`,
+    `test_exact_matrix_enumeration_equals_the_per_particle_reference`,
+    `test_mc_matches_exact_within_four_standard_errors`,
+    `test_mc_vectorised_equals_the_per_sample_reference`,
+    `test_mc_is_deterministic_and_quantised`,
+    `test_cap_forces_and_forbids_fallback`, `test_mc_flag_present_only_when_used`,
+    and the slow `test_m_seed4_worst_pair_completes_under_budget`.
+  - *Cost of the miss.* ≈ 108 box-hours on the 0.2.2 ladder (D-TB-17) plus
+    m-s1 (12 h), m-s4 and l ×5 (≈ 4 h) at 0.2.3, and the 26 corpora to be
+    regenerated. The lesson beside D-TB-13/16/17's "prototype every phase on
+    every rung": an enumerator that assumes an order must assert it, and a
+    reorder that "makes it worse" may be the first correct computation.
+
+- **D-TB-20 — retry attempts are held ABSENT in the nominal context of the
+  operation's final and of the attempt that follows them (2026-09-15).** D-TB-3
+  holds a child's other parents at their nominal value, index 0 of the value
+  list, which for an attempt is `ok`. A final `F:v` therefore held every retry
+  `A:v:k` (k ≥ 1) at `ok`, and since a final is the last non-absent attempt,
+  the first attempt was inert on it: `A:v:0 → F:v` had strength 0 and the
+  callee→caller dependence through the final rode the last attempt only. The
+  analogous client finals `C:c:j:F` held `C:c:j:k≥1` at `ok`. Found while
+  analysing the projection (plan of 2026-09-13, observation O3); owner
+  decision 2026-09-15, question Q4 of that plan.
+  - *Rule.* Wherever a retry attempt (`A:v:k`, `T:bff:c:j:k`, `C:c:j:k`,
+    k ≥ 1) is a *held* parent — in the op's final and in the attempt or BFF
+    invocation that follows it — its nominal value is `absent`: a `context_override`
+    on `_add_final`, on `A:v:k` for k ≥ 2 and on `I:bff:c:j:k` for k ≥ 2. A
+    first attempt's strength is then the **controlled direct effect with no
+    retry**, consistent with `Mechanism.compatible`. The client outcome
+    `C:c:j:k` of a retry attempt is not a following attempt and is unchanged.
+    On the following attempt the override changes no number (the previous
+    attempt at `ok` and at `absent` both give a retry probability of 0); it
+    is there for consistency.
+  - *What moves.* Mechanism edges `A:v:0 → F:v` and `C:c:j:0 → C:c:j:F` go
+    from 0 to 1.0 (a copy). Scoring-target strengths on the `xs` seed-0 instance:
+    request grain 170 of 520 directed edges move (largest 0.917, 14 across the
+    0.05 floor, all downward, 467 → 453 at the floor), session grain 182
+    (17 across); no edge is added or removed at either grain; bidirected
+    strengths are untouched (no latent path passes a final). The largest
+    moves are `(callee, 5xx) → (caller, slow)`: before, a callee 5xx with its
+    retry held `ok` made the caller SLOW (it waited for a retry that succeeded,
+    ≈ 0.95); with the retry held absent the callee's final is the 5xx itself
+    and the caller's outcome is the propagated failure (≈ 0.04–0.18). The
+    forced-rerun check (PRD 21) re-runs on `xs` with the new contexts — see the
+    registry row of 2026-09-15.
+  - *Guard.* `tests/test_mechanism.py::test_retry_attempts_are_held_absent_in_finals_and_following_attempts`.
+
 ## Implementation notes (not deviations)
 
 - **Every operation lies on a journey.** The topology sampler attaches an
@@ -508,12 +685,17 @@ the specification; this file records the implementation's departures from it.
 | 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.0 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 4 shards per variant, 49 s for the whole job (generate 20.6 s + 17.0 s, verify 5.4 s + 5.7 s); `verify` manifest, names and private denylist clean on both variants (200k records scanned each). **Freeze source of `tests/fixtures/xs-checksums.json`** (70 files latent, 74 twin, config_hash `1656f43b4b6e5deb690a31574bd98e55`); regeneration with one worker reproduces every checksum. Not uploaded: the published xs corpora come from the cloud job over all five seeds. |
 | 2026-09-12 | xs | latent + twin | 0..4 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 1 2 3 4 --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.0 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 10 corpora, 21 steps ok, 581 s total (40-55 s generate and ~11 s verify per corpus; the single upload of all ten, 292 MB, took 21.2 s); `verify` manifest, names and private denylist clean on all ten; published to the dataset host as `instances/xs/{latent,twin}/seed=0..4` (72 / 76 files each, no `run/`, no `artifacts.json`) and written back to the versioned object-store prefix (783 objects). **Cross-machine byte identity FAILED on 6 of 70 metadata files — see D-TB-15.** Superseded by 0.2.1; to be regenerated. |
 | 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.1 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 49 s for the job; `verify` manifest, names and private denylist clean on both variants. **Re-freeze source of `tests/fixtures/xs-checksums.json` after D-TB-15** (70 / 74 files, config_hash `1656f43b4b6e5deb690a31574bd98e55` — unchanged, the configuration did not move). |
-| 2026-09-12 | xs | latent + twin | 0..4 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 1 2 3 4 --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 10 corpora, 21 steps ok, 577 s, upload 27.2 s; `verify` manifest, names and denylist clean on all ten; realised alphabet by seed 78 / 77 / 76 / 79 / 79. **Cross-machine byte identity PASSES** — all 70 sha256 of `latent/seed=0` and 74 of `twin/seed=0` match the fixture frozen on arm64 macOS, confirming D-TB-15. Published to the dataset host and the versioned object-store prefix. |
-| 2026-09-12 | s | latent + twin | 0, 2, 3 | `python -m tracebench.pipeline --config configs/instances/s.yaml --seeds <k> --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 2 corpora per job, 5 steps ok each. Wall clock per job 7,656–8,622 s (2.1–2.4 h): generate ≈ 3,778–4,218 s per corpus, verify only ~21 s, upload 64–297 s. 96 shards, realised alphabet 322 of 323 potential, identical `config_hash` across seeds. `verify` manifest, names and private denylist clean. **2.3× the plan's ≈ 1 h estimate** — EC2 is slower than the local Apple-silicon timing the estimate came from, and emission is single-core-bound; re-estimates m ≈ 4.6 h, l ≈ 6.9 h, xl ≈ 14–23 h against caps of 12 h and 36 h. |
+| 2026-09-12 | xs | latent + twin | 0..4 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 1 2 3 4 --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 10 corpora, 21 steps ok, 577 s, upload 27.2 s; `verify` manifest, names and denylist clean on all ten; realised alphabet by seed 78 / 77 / 76 / 79 / 79. **Cross-machine byte identity PASSES** — all 70 sha256 of `latent/seed=0` and 74 of `twin/seed=0` match the fixture frozen on arm64 macOS, confirming D-TB-15. Published to the dataset host and the versioned object-store prefix. **Superseded by D-TB-19 (scoring target); the emitted data is valid. To be regenerated at 0.3.0.** |
+| 2026-09-12 | s | latent + twin | 0, 2, 3 | `python -m tracebench.pipeline --config configs/instances/s.yaml --seeds <k> --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: 2 corpora per job, 5 steps ok each. Wall clock per job 7,656–8,622 s (2.1–2.4 h): generate ≈ 3,778–4,218 s per corpus, verify only ~21 s, upload 64–297 s. 96 shards, realised alphabet 322 of 323 potential, identical `config_hash` across seeds. `verify` manifest, names and private denylist clean. **2.3× the plan's ≈ 1 h estimate** — EC2 is slower than the local Apple-silicon timing the estimate came from, and emission is single-core-bound; re-estimates m ≈ 4.6 h, l ≈ 6.9 h, xl ≈ 14–23 h against caps of 12 h and 36 h. **Superseded by D-TB-19 (scoring target); the emitted data is valid. To be regenerated at 0.3.0.** |
 | 2026-09-12 | s | latent | 1, 4 | same as above, `--seeds 1` / `--seeds 4` | 0.2.1 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **FAILED at shard 15 (both) and shard 28 (seed 1)** after 852 s and 906 s: `IndexError ... size 2839` — the spill allowance, see **D-TB-16**. Nothing was uploaded; the partial corpora reached the object store without a `COMPLETE` marker (196 and 202 objects), so they cannot be mistaken for whole ones. To be re-run at 0.2.2. |
 | 2026-09-12 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.2 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 47 s; `verify` manifest, names and denylist clean. **Re-freeze source of `tests/fixtures/xs-checksums.json` after D-TB-16**; only `instantiation.json` differs from the 0.2.1 corpus (it records `tool_version`), `config_hash` unchanged. |
-| 2026-09-12/13 | s | latent + twin | 1, 4 | `python -m tracebench.pipeline --config configs/instances/s.yaml --seeds <k> --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete (the D-TB-16 re-runs): seed 1 9,528 s (generate 4,749 / 4,670 s, verify 23 / 24 s, upload 62 s); seed 4 10,424 s (5,223 / 5,076 s, 23 / 25 s, 77 s). Spill retries, one attempt each and identical in both variants: shard 15 needed 2,873 (seed 1) / 2,846 (seed 4) ticks against 2,839 held, shard 28 needed 3,375 (seed 1), and shard 87 needed 3,036 (seed 4 — a shard the 0.2.1 run never reached). 96 shards, realised alphabet 322 of 323, `config_hash` identical to seeds 0, 2, 3; `verify` manifest, names and private denylist clean; published to the dataset host and written back under the versioned prefix. **The `s` rung is complete: 10 of 10.** |
-| 2026-09-12/13 | m | latent + twin | 3 | same shape, `--config configs/instances/m.yaml --seeds 3` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: **37,142 s (10.3 h)** — latent generate 29,656 s, of which 6 h 19 min passed before the first shard (**D-TB-17**), twin generate 7,241 s (its projection 2.5 min), verify 28 / 29 s, upload 188 s (13.4 GB, 2,856 files). 192 shards, realised alphabet 2,650 of 2,661 (the estimator expected 1,585), `config_hash d72cb6a3…`; request target 26,995 directed / 775,455 bidirected (24,633 / 13,470 at the floor), session 27,393 / 1,560,908; correlator unattributed 2.4 %, session Jaccard 1.00 over 694,444 sessions; `verify` clean; published and written back. |
+| 2026-09-12/13 | s | latent + twin | 1, 4 | `python -m tracebench.pipeline --config configs/instances/s.yaml --seeds <k> --out data/corpora --workers 8 --denylist data/denylist.json --upload --stage-dir data/hf-stage` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete (the D-TB-16 re-runs): seed 1 9,528 s (generate 4,749 / 4,670 s, verify 23 / 24 s, upload 62 s); seed 4 10,424 s (5,223 / 5,076 s, 23 / 25 s, 77 s). Spill retries, one attempt each and identical in both variants: shard 15 needed 2,873 (seed 1) / 2,846 (seed 4) ticks against 2,839 held, shard 28 needed 3,375 (seed 1), and shard 87 needed 3,036 (seed 4 — a shard the 0.2.1 run never reached). 96 shards, realised alphabet 322 of 323, `config_hash` identical to seeds 0, 2, 3; `verify` manifest, names and private denylist clean; published to the dataset host and written back under the versioned prefix. **The `s` rung is complete: 10 of 10.** **Superseded by D-TB-19 (scoring target); the emitted data is valid. To be regenerated at 0.3.0.** |
+| 2026-09-12/13 | m | latent + twin | 3 | same shape, `--config configs/instances/m.yaml --seeds 3` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: **37,142 s (10.3 h)** — latent generate 29,656 s, of which 6 h 19 min passed before the first shard (**D-TB-17**), twin generate 7,241 s (its projection 2.5 min), verify 28 / 29 s, upload 188 s (13.4 GB, 2,856 files). 192 shards, realised alphabet 2,650 of 2,661 (the estimator expected 1,585), `config_hash d72cb6a3…`; request target 26,995 directed / 775,455 bidirected (24,633 / 13,470 at the floor), session 27,393 / 1,560,908; correlator unattributed 2.4 %, session Jaccard 1.00 over 694,444 sessions; `verify` clean; published and written back. **Superseded by D-TB-19 (scoring target); the emitted data is valid. To be regenerated at 0.3.0.** |
 | 2026-09-12/13 | m | latent | 0, 1, 2, 4 | same shape, `--seeds <k>` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **TERMINATED by the 12-hour runtime cap** (2026-09-13 11:18–11:20 UTC) still inside the latent projection: the log ends at the size estimate, no `graphs` event in 11 h 55 min, one of eight vCPUs busy throughout. Nothing synced to the object store, nothing uploaded. See D-TB-17; to be re-run at 0.2.3. |
 | 2026-09-13 | l | latent | 0–4 | same shape, `--config configs/instances/l.yaml --seeds <k>` | 0.2.2 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **DESTROYED by the owner after 9.7 h** (11:31 UTC), all five still inside the latent projection at 2.9× the `m` work — they could not have finished inside the cap. Nothing synced, nothing uploaded. See D-TB-17; to be re-run at 0.2.3. |
 | 2026-09-13 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.2.3 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 43 s; `verify` manifest, names and denylist clean. Against the 0.2.2 fixture, `instantiation.json` (tool version) and `topology/callgraph.json` (`derived` now `2026-01-05`, D-TB-18) differ; every other file, `config_hash` included, is identical. **Re-freeze source of `tests/fixtures/xs-checksums.json` at 0.2.3** (70 / 74 files). |
+| 2026-09-13 | m | latent + twin | 0, 2 | same shape, `--config configs/instances/m.yaml --seeds <k>` | 0.2.3 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | complete: seed 0 13,808 s, seed 2 15,874 s (graphs in 11 / 18 min after D-TB-17); manifests at tool 0.2.3, `config_hash` equal to seed 3's, realised alphabet 2,644 / 2,654, `callgraph.json:derived` 2026-01-05 (D-TB-18); `verify` clean; published to the dataset host and written back under the versioned prefix. **Superseded by D-TB-19 (scoring target computed under the wrong chain order); the emitted data is valid. To be regenerated at 0.3.0.** |
+| 2026-09-13 | m | latent | 4 | same shape, `--seeds 4` | 0.2.3 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **OOM-KILLED after 27.6 min** (bash `Killed`, exit 137) inside the latent projection: the exact frontier of `intensity → A:<external op>:0` at this seed is bounded by 10^11.5 particles under the 0.2.3 order (10^19 under the corrected one, D-TB-19). Only `instantiation.json`, the mechanism graph and the alphabet reached the object store, no `COMPLETE` marker — an orphan to delete with the prefix. To be re-run at 0.3.0. |
+| 2026-09-13 | m | latent | 1 | same shape, `--seeds 1` | 0.2.3 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **DESTROYED by the owner** (decision Q6 of the 2026-09-13 plan) after 7 h 40 min inside the latent projection (last log line the `estimate` event); its exact frontier is bounded by 10^9.1 under the 0.2.3 order. Even finished, its target would have been superseded by D-TB-19. Nothing synced, nothing uploaded. To be re-run at 0.3.0. |
+| 2026-09-13 | l | latent | 0–4 | same shape, `--config configs/instances/l.yaml --seeds <k>` | 0.2.3 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **DESTROYED by the owner after ~50 min**, all five still at the `estimate` event: the l-rung frontiers are bounded by 10^22–10^28 under the 0.2.3 order (10^49 corrected), out of reach of any exact enumeration. Nothing synced, nothing uploaded. To be re-run at 0.3.0 (D-TB-19). |
+| 2026-09-15 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.3.0 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 49 s for the job (generate 20.1 s + 17.2 s, verify 5.6 s + 5.8 s); `verify` manifest, names and private denylist clean on both variants; parent-link F1 0.998, unattributed 1.1 %. Against the 0.2.3 fixture exactly seven files per variant differ — the five `graphs/` target artifacts (D-TB-19), `graphs/mechanism-graph.json` (D-TB-20) and `instantiation.json` — every data file is byte-identical and `config_hash` is unchanged (`1656f43b…`). Request-grain target 520 directed / 1,865 bidirected (453 / 111 at the floor), session grain 1,300 / 2,238 (716 / 274), no effect by Monte Carlo at this rung. `check_mechanism --max-edges 40 --non-edges 8` on a copy of the latent variant: 39/40 sampled edges within 0.03 (the miss is the SLOW-mediated `F:9 → A:6:0` residual, 0.533 vs 0.565, the D-TB-9 channel as at 0.2.x), non-edges 8/8 with a largest residual of 0.0012, the sampled `A:12:0 → F:12` edge reproduces its new strength of 1.0. **Re-freeze source of `tests/fixtures/xs-checksums.json` at 0.3.0** (70 / 74 files). Step-0 projection measurements at m/l/xl (no corpus generated) are tabulated in D-TB-19. |

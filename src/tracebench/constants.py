@@ -87,6 +87,25 @@ INSTANTIATE_SHARD = -1
 # across the two architectures, which is what located the gap.
 MC_DECIMALS = 9
 
+# --- projection budget (D-TB-19) --------------------------------------------------------
+# The latent projection marginalises the intermediates of each (source,
+# destination) pair exactly by a frontier-merged enumeration. Above this many
+# particles in one frontier the effect is instead a counter-keyed Monte-Carlo
+# estimate over PROJECTION_MC_N forward samples of the chain (common random
+# numbers across the source's values), rounded at MC_DECIMALS and flagged on
+# every edge it feeds (`mc: {n, se}`). Particle counts are exact integer
+# functions of the tables and the prune, so the decision is the same on every
+# platform. Both values are properties of the tool version, not of the
+# configuration: `config_hash` does not cover them. Chosen from the
+# measurements recorded in RUN.md D-TB-19: the frontier is an int8 matrix
+# plus a weight vector (a few dozen bytes per particle, plus one step's
+# |values|-fold expansion), so five million particles cost about 2.5 GB at the
+# largest rung and leave only the external operation's first attempt (and two
+# service ops at one m seed) to Monte Carlo; N = 40,000 gives a standard
+# error of at most 0.0025 per probability, 5 % of the default floor.
+PROJECTION_CAP_PARTICLES = 5_000_000
+PROJECTION_MC_N = 40_000
+
 # --- PRD-pinned values ---------------------------------------------------------------
 DEFAULT_FLOOR = 0.05
 FLOOR_SWEEP = (0.01, 0.02, 0.05, 0.10, 0.20, 0.50)

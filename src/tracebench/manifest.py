@@ -80,7 +80,8 @@ def build_manifest(corpus_dir, label=None):
         "alphabet_size_vocab": stats.get("vocab_size"),
         "n_nodes_mechanism": inst["counts"]["mechanism_nodes"], "n_latent_nodes": inst["counts"]["mechanism_latent_nodes"],
         "counts": {**inst["counts"], "shards": len(shards), "view_rows": stats.get("rows")},
-        "target_counts": {k: target.get(k) for k in ("n_directed", "n_bidirected", "n_directed_at_floor", "n_bidirected_at_floor")},
+        "target_counts": {k: target.get(k) for k in ("n_directed", "n_bidirected", "n_directed_at_floor", "n_bidirected_at_floor",
+                                                     "n_directed_mc", "n_bidirected_mc", "n_effects_exact", "n_effects_mc", "mc_se_max")},
         "byte_identity_excludes": list(BYTE_IDENTITY_EXCLUDES),
         "files": files,
     }
