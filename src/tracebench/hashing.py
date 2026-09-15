@@ -27,6 +27,7 @@ D_EMIT = 6
 D_SKEW = 7
 D_DEFECT = 8
 D_CLIENT = 9
+D_PROJECTION = 10     # latent-projection Monte Carlo above the particle cap (D-TB-19)
 
 
 def splitmix64(z):

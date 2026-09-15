@@ -11,7 +11,10 @@ Every node exposes `dist(ctx)` — its distribution given a mapping parent id ->
 value name — built from the same tables and samplers the engine uses to
 generate data. The strength of an edge P -> C is the maximum over pairs of P's
 values of the total-variation distance between C's distributions, with C's
-other parents held at the node's nominal context (D-TB-3). Duration-mediated
+other parents held at the node's nominal context (D-TB-3); a retry attempt is
+held ABSENT in the nominal context of the operation's final and of the attempt
+that follows it, so a first-attempt strength is the controlled direct effect
+with no retry (D-TB-20). Duration-mediated
 probabilities (the SLOW class) are Monte Carlo estimates from a dedicated,
 order-independent random stream (`Stream.LATENCY`, keyed by op and context).
 """
@@ -432,7 +435,10 @@ class Mechanism:
                 p_absent *= (1 - p_call * miss)
             return (1 - p_absent, p_absent)
 
-        self._add(FunctionNode(var, parents, invoke_fn, override, ctx_for))
+        inv = self._add(FunctionNode(var, parents, invoke_fn, override, ctx_for))
+        # (caller presence id, cache latent id, p_hit, p_call) per incoming call
+        # edge: the projection's vectorised sampler evaluates the noisy-OR from it.
+        inv.edge_info = list(edge_info)
         svc = op.service
         callee_finals = [f"F:{e.callee}" for e in topo.callee_edges(op.id)]
         callee_firsts = [f"A:{e.callee}:0" for e in topo.callee_edges(op.id)] if self.backend_retries > 0 else []
@@ -458,7 +464,8 @@ class Mechanism:
                 retry = self.callee_retry_probs({int(f.split(":")[1]): ctx[f] for f in callee_firsts})
                 return self.attempt_dist(op_id, present_p, health, pool, cold, classes, callee_retry=retry)
 
-            self._add(FunctionNode(var_k, parents_k, attempt_fn))
+            # D-TB-20: the attempt that follows a retry holds that retry at absent.
+            self._add(FunctionNode(var_k, parents_k, attempt_fn, {first: "absent"} if k >= 2 else None))
         self._add_final(f"F:{op.id}", [f"A:{op.id}:{k}" for k in range(R + 1)], T_VALUES, op.id,
                         {"op": op.name, "service": topo.services[op.service].name})
 
@@ -476,7 +483,11 @@ class Mechanism:
             out[values.index(last)] = 1.0
             return out
 
-        self._add(FunctionNode(var, attempts, final_fn))
+        # D-TB-20: a final holds every retry attempt at absent, so the first
+        # attempt's effect on it (and through it) is the controlled direct
+        # effect with no retry; before, the last attempt's nominal `ok` made the
+        # earlier attempts inert.
+        self._add(FunctionNode(var, attempts, final_fn, {a: "absent" for a in attempts[1:]}))
 
     def _build_bff_step(self, sc, st):
         topo = self.topo
@@ -507,7 +518,7 @@ class Mechanism:
 
             self._add(FunctionNode(StateVar(iid, "invoke", "event", PRESENCE_VALUES, latent=False, derived=True,
                                             token_op=b, meta={"scenario": sc.name, "step": st.index, "attempt": k, "op": topo.ops[b].name}),
-                                   inv_parents, inv_fn))
+                                   inv_parents, inv_fn, {inv_parents[0]: "absent"} if k >= 2 else None))
             tid = f"T:bff:{sc.index}:{st.index}:{k}"
             t_parents = [iid, f"auth:{sc.index}", f"health:{b}", f"pool:{bff_svc}"] + ([f"cache:{bff_svc}"] if has_cache else []) + callee_finals + callee_firsts
 

@@ -192,3 +192,33 @@ def test_held_distributions_are_memoised_and_identical_to_a_cold_evaluation(monk
         assert calls["n"] == after_first + 1
         assert np.array_equal(fresh, first) and fresh.dtype == first.dtype, node.var.id
         assert abs(float(first.sum()) - 1.0) < 1e-12
+
+
+def test_retry_attempts_are_held_absent_in_finals_and_following_attempts():
+    """D-TB-20: a retry attempt is held ABSENT wherever it is a held parent —
+    in the operation's final and in the attempt (or BFF invocation) that follows
+    it — so a first attempt's strength is the controlled direct effect with no
+    retry. Before, the last attempt's nominal `ok` made every earlier attempt
+    inert on the final (A:v:0 -> F:v had strength 0)."""
+    inst = xs_instantiation()
+    mech = inst.mechanism
+    n_finals = n_following = 0
+    for nid, node in mech.nodes.items():
+        parts = nid.split(":")
+        if node.var.group == "final":
+            attempts = list(node.parents)
+            assert all(node.context_override.get(a) == "absent" for a in attempts[1:]), nid
+            assert attempts[0] not in node.context_override
+            n_finals += 1
+        elif node.var.group == "attempt" and parts[0] == "A" and int(parts[2]) >= 2:
+            assert node.context_override == {f"A:{parts[1]}:{int(parts[2]) - 1}": "absent"}, nid
+            n_following += 1
+        elif node.var.group == "invoke" and parts[1] == "bff" and int(parts[4]) >= 2:
+            assert node.context_override == {f"T:bff:{parts[2]}:{parts[3]}:{int(parts[4]) - 1}": "absent"}, nid
+            n_following += 1
+    assert n_finals > 0 and n_following > 0
+    g = mech.graph_json(ctxmax=False)
+    first_to_final = [e for e in g["edges"] if e["src"].split(":")[0] in ("A", "C") and e["src"].endswith(":0") and e["dst"].startswith(("F:", "C:")) and e["dst"].endswith(("F:", ":F")) or (e["src"].startswith("A:") and e["src"].endswith(":0") and e["dst"].startswith("F:"))]
+    assert first_to_final and all(e["strength"] == 1.0 for e in first_to_final), [e for e in first_to_final if e["strength"] != 1.0][:3]
+    for e in first_to_final:
+        assert all(v == "absent" for k, v in e["context"].items()), e

@@ -283,8 +283,10 @@ structural rule the whole design leans on:
 This is a documented limitation, and it buys two things. First, the latent
 trajectory is **independent of the requests**, so it can be simulated once,
 sequentially, and the request simulation can then be split into parallel
-shards (§10). Second, every directed path between observables runs *forward* in
-request time, so the projected directed graph is acyclic by construction.
+shards (§10). Second, every directed path between observables within one
+request runs *forward* in request time, so the request-grain projected
+directed graph is acyclic (§8.2); across requests a journey feeds the next
+step's invocation, which is why the session grain may be cyclic.
 
 The mechanism is a **dynamic Bayesian network** in the Koller and Friedman
 sense: a DAG over variables indexed by time, with two timescales (ticks and
@@ -425,6 +427,12 @@ refinements:
   parent set has at most four members: the maximum of the same quantity over
   *all* assignments of the other parents. It exists because a parent can be
   inert at nominal and decisive elsewhere (an AND-gate shape).
+- **Retry attempts are held absent** (D-TB-20). Index 0 of an attempt's value
+  list is `ok`, and a final is the last non-absent attempt, so holding the
+  retries at `ok` made the first attempt inert on the final. A retry `A:v:k`
+  ($k \ge 1$) is therefore held at `absent` in the nominal context of the
+  final and of the attempt that follows it: the first attempt's strength is
+  the controlled direct effect with no retry.
 
 Every mechanism edge, however faint, is stored with its strength. The floor
 (§8) is applied later and elsewhere.
@@ -533,15 +541,40 @@ $$
 P(Y \mid \mathrm{do}(X = x))
 $$
 
-by enumerating the intermediates in topological order and summing them out
-exactly (a "frontier-merged" enumeration that keeps only the intermediate
-values later nodes still need, pruning mass below $10^{-10}$). Every other
+by enumerating the intermediates of the pair in a topological order of their
+own induced subgraph and summing them out exactly (a "frontier-merged"
+enumeration that keeps only the intermediate values later nodes still need,
+pruning mass below $10^{-10}$). The order is per pair: the mechanism is cyclic
+at the *type* level (an invocation variable `I:v` is shared by every journey
+step that reaches $v$, and a journey feeds the next step's invocation), but
+every such cycle passes a token node and token nodes are never intermediates,
+so each chain is acyclic. The order chosen is greedy — at each step the ready
+node that grows the held frontier least, ties broken by construction
+position — because the frontier is what the enumeration pays for. The frontier
+itself is an integer matrix of assignments (one column per held variable)
+with a weight vector, merged by row after each step, which is what lets the
+cap below sit at five million particles in a couple of gigabytes. Every other
 parent of every node on the way is held at its nominal context, and a
 tick-level latent that is held contributes its stationary distribution (§5.4).
 The notation $\mathrm{do}(\cdot)$ is Pearl's: set the variable by intervention
 rather than observe it, which here simply means "plug the value into the
 tables". For a bidirected edge the two arms $\ell \to X$ and $\ell \to Y$ are
 computed the same way and combined by a minimum (§7.2, D-TB-4).
+
+Exactness has a budget (D-TB-19). For a handful of pairs at `m` and above —
+`intensity` into the first attempt of an operation with many callers — the
+frontier is the joint cache and load state of every service on every path,
+and the exact enumeration is the $s$–$t$ reliability of a layered network with
+independent edge failures, which is #P-complete. Above a fixed particle cap
+(`PROJECTION_CAP_PARTICLES`, a property of the tool version) the effect is
+instead estimated by forward sampling of the same chain: `PROJECTION_MC_N`
+samples whose uniforms are counter-keyed by (seed, pair, sample, step), so the
+three values of the source share the same draws (common random numbers) and
+the estimate is a function of the pair alone, never of call order or
+platform; the last node is exact given its sampled parents and the result is
+rounded at `MC_DECIMALS`. Every edge such an estimate feeds carries
+`mc: {n, se}`, and each target's header counts them (`n_effects_mc`,
+`mc_se_max`). At `xs` and `s` nothing reaches the cap.
 
 ### 6.4 Worked example: a route through a derived node
 
@@ -693,8 +726,11 @@ scored against. The target is therefore restricted to a **scoring universe**:
 ordered token pairs whose operations can **co-occur**.
 
 - **Request grain**: the two ops can share one request tree (both reachable
-  from a common BFF endpoint). Pairs are directed forward in request time, so
-  the request-grain target is acyclic by construction.
+  from a common BFF endpoint), and only within-request paths count: the BFF
+  invocation variables `I:bff:*` are not intermediates at this grain, because
+  every path through one of them (a client retry re-invoking the BFF, a
+  step's client outcome gating the next step) crosses a request boundary
+  (D-TB-19). The request-grain target is acyclic by that through-set.
 - **Session grain**: the two ops can share one journey. This adds journey
   edges (a step's client outcome gating the next step's invocation) and
   cross-request confounding such as the `net` example above, and it may be
@@ -887,7 +923,8 @@ A prediction is a JSON file listing directed edges (src, dst, score) and
 bidirected edges (a, b, score). The **universe** is the set of ordered token
 pairs in co-occurrence support (§8.2), with within-operation pairs excluded;
 predictions outside it are counted and ignored. Truth at a floor is the set of
-target edges with strength at or above it.
+target edges with strength at or above it. The scorer reads strengths only;
+the `mc` flag an edge may carry (§6.3) is a disclosure, not an input.
 
 ### 12.2 The axes
 
@@ -1012,6 +1049,10 @@ twin as observed latents (5), both orderings and grains (6), the residual
 duration channel (9), co-occurrence support (10), explicit outcome shares for
 degraded and exhausted states (11), rung windows and rates sized to the cap
 (12), and the per-edge call probability with its depth calibration (13).
+Later entries concern reproducibility and the ladder (14–18) and the
+projection's computation: the per-pair chain order, the request-grain
+through-set and the Monte-Carlo budget (19, §6.3 and §8.2), and retries held
+absent in a final's nominal context (20, §5.2).
 
 ### 13.4 Module-to-concept map
 
