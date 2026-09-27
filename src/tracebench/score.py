@@ -186,8 +186,9 @@ def score_at_floor(target, alphabet, prediction, floor, ordered=None, unordered=
     bidirected = prf(len(tb & set(pb)), len(set(pb) - tb), len(tb - set(pb)))
     # mixed SHD: one per unordered pair whose state differs
     shd_mixed = 0
+    spd, spb = set(pd), set(pb)  # built once: rebuilding them per pair made this loop quadratic
     for a, b in unordered:
-        if _pair_state(a, b, td, tb) != _pair_state(a, b, set(pd), set(pb)):
+        if _pair_state(a, b, td, tb) != _pair_state(a, b, spd, spb):
             shd_mixed += 1
     # threshold-free axes
     y_d = [(a, b) in td for a, b in ordered]
