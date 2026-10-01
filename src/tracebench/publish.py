@@ -62,6 +62,23 @@ tags: [causal-discovery, root-cause-analysis, microservices, synthetic, benchmar
 
 # trace-bench {version}
 
+## Executive summary
+
+Each named instance simulates a SaaS system at one of five sizes. A
+backend-for-frontend (BFF) gateway sits in front of the backend services, and
+every instance also has one external service. The table below gives each
+instance's size, as set in `configs/instances/<instance>.yaml`.
+
+| instance | services | endpoints / service | backend endpoints | BFF endpoints | scenarios | clients | simulated time | where it runs |
+|---|---|---|---|---|---|---|---|---|
+| xs | 3 | 3 | 9 | 4 | 2 | 20 | 1 hour | local (test fixture) |
+| s | 10 | 5 | 50 | 8 | 4 | 200 | 1 day | local |
+| m | 50 | 10 | 500 | 20 | 8 | 2,000 | 2 days | local |
+| l | 150 | 10 | 1,500 | 30 | 12 | 6,000 | 3 days | local |
+| xl | 350 | 12 | 4,200 | 60 | 20 | 20,000 | 5 days | cloud only |
+
+## About
+
 A simulated microservice trace benchmark with ground-truth causal graphs.
 Each named instance ships a raw heterogeneous log feed (no parent pointers),
 the correlated sequence views, the mechanism graph that generated the data
