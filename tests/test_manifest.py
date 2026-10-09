@@ -8,15 +8,16 @@ path is exercised end to end (staging tree, duplicate refusal, replace) and so
 is the release path (remote verification against every manifest, tag refusal,
 card and index)."""
 import hashlib
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
 
-from tracebench.manifest import build_manifest, freeze_checksums, verify, verify_manifest, write_manifest
-from tracebench.publish import path_in_repo, plan_release, plan_upload, release, upload
+from tracebench.manifest import build_manifest, freeze_checksums, scan_names, verify, verify_manifest, write_manifest
+from tracebench.publish import fetch, path_in_repo, plan_release, plan_upload, release, upload
 from tracebench.record import read_json, write_json
-from corpus_fixture import xs_corpus
+from corpus_fixture import xs_corpus, xs_metrics_corpus
 
 
 def test_manifest_fields_and_verification(tmp_path):
@@ -41,6 +42,35 @@ def test_manifest_fields_and_verification(tmp_path):
     finally:
         target.write_text(original)
     assert not verify_manifest(corpus)
+
+
+def test_manifest_carries_exposure_and_provenance():
+    latent = read_json(xs_corpus() / "manifest.json")
+    assert latent["exposure"] == {"exposed_groups": [], "hidden_groups": ["auth", "cache", "health", "intensity", "load", "net", "pool"]}
+    assert latent["derived_from"] is None and latent["metrics"] is None
+    metrics = read_json(xs_metrics_corpus() / "manifest.json")
+    assert metrics["derived_from"]["corpus_key"] == "xs/latent/seed=0"
+    assert metrics["metrics"]["families"] == ["endpoint_health", "pool_state", "service_load", "traffic_intensity"]
+    assert set(metrics["metrics"]["share_invisible_at_scrape"]) == {"health", "intensity", "load", "pool"}
+    assert any(f["path"].startswith("metrics/") and f["method_readable"] for f in metrics["files"])
+    assert all(not f["method_readable"] for f in metrics["files"] if f["path"].startswith("oracle/state/"))
+
+
+def test_name_scan_covers_the_metrics_channel(tmp_path):
+    corpus = xs_metrics_corpus()
+    series = read_json(corpus / "metrics" / "series.json")["series"]
+    service = next(s["service"] for s in series if s["service"])
+    write_json(tmp_path / "deny.json", {"names": [service]})
+    # the channel alone (the feed would flood the problem cap with the same name)
+    part = tmp_path / "part"
+    for rel in ("metrics", "oracle/state", "topology"):
+        shutil.copytree(corpus / rel, part / rel)
+    shutil.copy2(corpus / "instantiation.json", part / "instantiation.json")
+    problems, scanned = scan_names(part, tmp_path / "deny.json")
+    assert any("samples.parquet" in p and service in p for p in problems)
+    assert any("changes.parquet" in p and service in p for p in problems)
+    assert scanned > 0
+    assert scan_names(part)[0] == [] and scan_names(corpus)[0] == []
 
 
 def test_freeze_checksums_pins_every_file(tmp_path):
@@ -228,10 +258,45 @@ def test_release_verifies_the_host_then_tags_it(tmp_path):
     res = release("v0.2.0", repo="chadyuk/trace-bench", api=api)
     assert res["version"] == "v0.2.0" and "v0.2.0" in api.tags
     card = api.remote["README.md"][2].decode()
-    assert "viewer: false" in card and "cc-by-4.0" in card and "| xs | latent | 0 |" in card
+    assert "viewer: false" in card and "cc-by-4.0" in card and "| xs | latent | 0 | none / " in card
+    assert "`metrics`" in card
     index = api.remote["release.json"][2].decode()
     assert '"version": "v0.2.0"' in index and '"path": "instances/xs/latent/seed=0"' in index
+    assert '"derived_from": null' in index
     assert "LICENSE" in api.remote
+
+
+def test_fetch_lands_only_the_verified_corpus(tmp_path):
+    corpus = xs_corpus()
+    out = tmp_path / "root"
+    calls = []
+
+    def stub_download(*, repo_id, repo_type, revision, local_dir, allow_patterns, max_workers):
+        calls.append({"repo_id": repo_id, "revision": revision, "allow_patterns": allow_patterns})
+        dest = Path(local_dir) / "instances" / "xs" / "latent" / "seed=0"
+        shutil.copytree(corpus, dest, ignore=shutil.ignore_patterns("run", "artifacts.json"))
+        cache = Path(local_dir) / ".cache" / "huggingface" / "download" / "x.metadata"
+        cache.parent.mkdir(parents=True)
+        cache.write_text("hub metadata\n")
+
+    res = fetch("xs/latent/seed=0", out, repo="chadyuk/trace-bench", revision="v0.3.0", download_fn=stub_download)
+    dest = out / "xs" / "latent" / "seed=0"
+    assert res["fetched"] and res["corpus_dir"] == str(dest) and (dest / "COMPLETE").exists()
+    assert calls == [{"repo_id": "chadyuk/trace-bench", "revision": "v0.3.0", "allow_patterns": ["instances/xs/latent/seed=0/*"]}]
+    assert not verify_manifest(dest) and not (out / ".hf-fetch").exists()
+    assert not list(dest.rglob(".cache")) and not (dest / "run").exists()
+    # already there: nothing is downloaded
+    assert fetch("xs/latent/seed=0", out, download_fn=stub_download)["fetched"] is False and len(calls) == 1
+    # a corpus that does not verify never lands, and the scratch directory is gone
+    def bad_download(*, local_dir, **kw):
+        stub_download(local_dir=local_dir, **kw)
+        (Path(local_dir) / "instances" / "xs" / "latent" / "seed=0" / "graphs" / "alphabet.json").write_text("{}")
+
+    with pytest.raises(RuntimeError, match="does not verify"):
+        fetch("xs/latent/seed=0", tmp_path / "root2", download_fn=bad_download)
+    assert not (tmp_path / "root2" / "xs").exists() and not (tmp_path / "root2" / ".hf-fetch").exists()
+    with pytest.raises(ValueError, match="corpus key"):
+        fetch("xs-latent-0", out, download_fn=stub_download)
 
 
 def test_release_refuses_a_missing_file_and_an_empty_host(tmp_path):

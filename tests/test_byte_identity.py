@@ -2,10 +2,10 @@
 byte-identically on a different machine at the same tool and constants version.
 
 `tests/fixtures/xs-checksums.json` is the committed pin: the per-file sha256 of
-the xs corpora (latent and twin, seed 0) generated from the shipped
-`configs/instances/xs.yaml`. Run locally, this test regenerates them and
-compares. The cross-machine half of the scenario is the same comparison against
-manifests produced elsewhere:
+the xs corpora (latent, twin and the derived metrics variant, seed 0) generated
+from the shipped `configs/instances/xs.yaml`. Run locally, this test
+regenerates them and compares. The cross-machine half of the scenario is the
+same comparison against manifests produced elsewhere:
 
     TRACEBENCH_XS_MANIFEST_DIR=<dir of pulled manifest.json files> \\
         pytest tests/test_byte_identity.py
@@ -14,7 +14,12 @@ Freeze the fixture after any change that alters corpus bytes (a tool-version
 bump included):
 
     python -m tracebench.manifest freeze --corpus <xs/latent/seed=0> \\
-        --corpus <xs/twin/seed=0> --out tests/fixtures/xs-checksums.json
+        --corpus <xs/twin/seed=0> --corpus <xs/metrics/seed=0> --out tests/fixtures/xs-checksums.json
+
+A published metrics corpus derived from a corpus of an earlier tool keeps that
+corpus's `instantiation.json` (the source file, byte-identical by design), so
+against pulled manifests that one file is allowed to differ when
+`derived_from.tool_version` is not the frozen tool version (D-TB-21).
 """
 import os
 from pathlib import Path
@@ -61,7 +66,9 @@ def _compare(frozen, manifests, key):
     assert m["config_hash"] == frozen["corpora"][key]["config_hash"], f"{key}: configuration differs"
     expected = frozen["corpora"][key]["files"]
     actual = {f["path"]: f["sha256"] for f in m["files"]}
-    changed = sorted(p for p in expected.keys() & actual.keys() if expected[p] != actual[p])
+    derived = m.get("derived_from") or {}
+    allowed = {"instantiation.json"} if derived and derived.get("tool_version") != frozen["tool_version"] else set()
+    changed = sorted(p for p in expected.keys() & actual.keys() if expected[p] != actual[p] and p not in allowed)
     assert not changed, f"{key}: {len(changed)} file(s) differ: {changed[:10]}"
     assert not sorted(expected.keys() - actual.keys()), f"{key}: files missing: {sorted(expected.keys() - actual.keys())[:10]}"
     assert not sorted(actual.keys() - expected.keys()), f"{key}: files not in the fixture: {sorted(actual.keys() - expected.keys())[:10]}"
@@ -81,9 +88,9 @@ def test_xs_seed0_matches_the_frozen_checksums():
         _compare(frozen, manifests, key)
 
 
-def test_the_fixture_pins_both_variants_of_seed_zero():
+def test_the_fixture_pins_every_variant_of_seed_zero():
     frozen = _frozen()
-    assert set(frozen["corpora"]) == {"xs/latent/seed=0", "xs/twin/seed=0"}
+    assert set(frozen["corpora"]) == {"xs/latent/seed=0", "xs/twin/seed=0", "xs/metrics/seed=0"}
     assert all(len(c["files"]) > 20 and all(len(s) == 64 for s in c["files"].values())
                for c in frozen["corpora"].values())
 

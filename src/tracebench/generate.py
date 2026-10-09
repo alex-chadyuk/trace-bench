@@ -1,7 +1,7 @@
 """Generate a corpus from a named-instance configuration.
 
     python -m tracebench.generate --config configs/instances/xs.yaml --seed 0 --out corpora \\
-        [--twin] [--override-cap] [--resume] [--stop-after-shard N] [--workers N]
+        [--variant latent|twin] [--override-cap] [--resume] [--stop-after-shard N] [--workers N]
 
 Order of operations (every step is a pure function of configuration, seed,
 tool version and constants):
@@ -25,7 +25,8 @@ from pathlib import Path
 import numpy as np
 
 from .constants import (
-    CASES_JSON, COMPLETE_MARKER, ESTIMATE_JSON, FAULTS_JSON, LABELS_DIR, RUN_DIR, VARIANT_LATENT, VARIANT_TWIN,
+    CASES_JSON, DERIVED_FROM, ESTIMATE_JSON, FAULTS_JSON, GENERATED_VARIANTS, LABELS_DIR, RUN_DIR, VARIANT_LATENT,
+    VARIANT_TWIN,
 )
 from .emit import Emitter
 from .engine import Engine, SpillExceeded
@@ -149,14 +150,21 @@ def spill_allowance(inst):
 
 
 def generate(config_path, seed, out, twin=False, override_cap=False, resume=False, stop_after_shard=None, workers=1,
-             correlate=True):
+             correlate=True, variant=None):
+    """`variant` names the corpus to simulate (`latent` or `twin`; `twin=True` is
+    the older spelling). A derived variant is refused: it comes from
+    `python -m tracebench.derive` on a complete latent corpus (D-TB-21)."""
+    variant = variant or (VARIANT_TWIN if twin else VARIANT_LATENT)
+    if variant not in GENERATED_VARIANTS:
+        source = DERIVED_FROM.get(variant, VARIANT_LATENT)
+        raise ValueError(f"variant {variant!r} is derived, not generated: run "
+                         f"`python -m tracebench.derive --from <{source} corpus> --variant {variant} --out <root>`")
     inst = instantiate_from_paths(config_path, seed=seed)
     cfg = inst.cfg
-    variant = VARIANT_TWIN if twin else VARIANT_LATENT
     corpus_dir = corpus_dir_for(out, cfg.name, variant, seed)
     corpus_dir.mkdir(parents=True, exist_ok=True)
     rec = RunRecord(corpus_dir, "generate", {"config": str(config_path), "seed": seed, "out": str(out), "twin": twin,
-                                             "override_cap": override_cap, "resume": resume,
+                                             "variant": variant, "override_cap": override_cap, "resume": resume,
                                              "stop_after_shard": stop_after_shard, "workers": workers})
     # The call-graph artifact's `derived` date is the simulated window's start
     # date, a function of the configuration alone — not the wall clock, which
@@ -221,12 +229,9 @@ def generate(config_path, seed, out, twin=False, override_cap=False, resume=Fals
         results["correlation"] = {k: v for k, v in report.items() if k in ("parent_link", "unattributed_fraction", "session_recovery")}
         log({"event": "correlate", "parent_link_f1": report["parent_link"]["all"]["f1"], "unattributed_fraction": report["unattributed_fraction"]})
     if complete:
-        # The manifest hashes every shipped file (run/ excluded); COMPLETE is
-        # written only after it exists.
-        from .manifest import write_manifest
-        manifest = write_manifest(corpus_dir)
+        from .manifest import finalize_corpus
+        manifest = finalize_corpus(corpus_dir, "shards complete" + ("; views written" if correlate else "; run `python -m tracebench.correlate`"))
         results["manifest"] = {"files": len(manifest["files"]), "alphabet_size_realized_train": manifest["alphabet_size_realized_train"]}
-        (corpus_dir / COMPLETE_MARKER).write_text("shards complete" + ("; views written" if correlate else "; run `python -m tracebench.correlate`") + "\n")
     rec.finish(results, status="ok" if complete else "partial")
     return results
 
@@ -257,7 +262,9 @@ def build_parser():
     p.add_argument("--config", required=True)
     p.add_argument("--seed", required=True, type=int)
     p.add_argument("--out", required=True)
-    p.add_argument("--twin", action="store_true", help="generate the fully-observable twin (latent values written onto records)")
+    p.add_argument("--twin", action="store_true", help="alias of --variant twin (the fully-observable twin)")
+    p.add_argument("--variant", default=None, choices=list(GENERATED_VARIANTS),
+                   help="which variant to simulate (default latent; the metrics variant is derived, see tracebench.derive)")
     p.add_argument("--override-cap", action="store_true")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--stop-after-shard", type=int, default=None)
@@ -271,7 +278,7 @@ def main(argv=None):
     try:
         res = generate(args.config, args.seed, args.out, twin=args.twin, override_cap=args.override_cap,
                        resume=args.resume, stop_after_shard=args.stop_after_shard, workers=args.workers,
-                       correlate=not args.skip_correlate)
+                       correlate=not args.skip_correlate, variant=args.variant)
     except CapExceeded as e:
         log({"event": "refused", "reason": str(e)})
         return 3

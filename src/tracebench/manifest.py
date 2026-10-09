@@ -16,13 +16,13 @@ import json
 import re
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import __version__
 from .allowlist import is_method_readable
 from .constants import (
-    ALPHABET_JSON, COMPLETE_MARKER, GRAPHS_DIR, INSTANTIATION_JSON, MANIFEST_JSON, MANIFEST_SCHEMA, RUN_DIR,
-    SCORING_TARGET_JSON,
+    ALPHABET_JSON, COMPLETE_MARKER, GRAPHS_DIR, INSTANTIATION_JSON, MANIFEST_JSON, MANIFEST_SCHEMA, METRICS_DIR, METRICS_SERIES_JSON, ORACLE_STATE_DIR, RUN_DIR, SCORING_TARGET_JSON, STATE_SAMPLING_JSON,
 )
 from .log import log
 from .naming import BFF_SERVICE, NAME_PATTERNS
@@ -47,7 +47,10 @@ def content_hash_parquet(path):
     return h.hexdigest()
 
 
-def build_manifest(corpus_dir, label=None):
+def build_manifest(corpus_dir, label=None, derived_from=None):
+    """`derived_from` names the source corpus of a derived variant (D-TB-21):
+    {corpus_key, variant, config_hash, tool_version, constants_version,
+    manifest_sha256, n_files_linked, n_files_copied}; None for a generated one."""
     corpus_dir = Path(corpus_dir)
     inst = read_json(corpus_dir / INSTANTIATION_JSON)
     files = []
@@ -68,6 +71,18 @@ def build_manifest(corpus_dir, label=None):
         stats = read_json(root)
         break
     shards = sorted(int(p.name[len("shard="):-len(".done")]) for p in (corpus_dir / "raw").glob("shard=*.done")) if (corpus_dir / "raw").exists() else []
+    exposure = ({"exposed_groups": target["exposed_groups"], "hidden_groups": target["hidden_groups"]}
+                if "hidden_groups" in target else None)
+    metrics = None
+    series_path = corpus_dir / METRICS_DIR / METRICS_SERIES_JSON
+    if series_path.exists():
+        series = read_json(series_path)
+        sampling_path = corpus_dir / ORACLE_STATE_DIR / STATE_SAMPLING_JSON
+        sampling = read_json(sampling_path) if sampling_path.exists() else {}
+        metrics = {"scrape_s": series["scrape_s"], "n_series": series["n_series"],
+                   "n_samples_per_series": series["n_samples_per_series"], "families": sorted(series["families"]),
+                   "share_invisible_at_scrape": {g: v["share_invisible_at_scrape"] for g, v in sampling.get("per_group", {}).items()
+                                                 if v.get("exposed")}}
     manifest = {
         "schema": MANIFEST_SCHEMA, "label": label,
         "instance": inst["instance"], "variant": corpus_dir.parent.name, "seed": inst["seed"],
@@ -80,6 +95,7 @@ def build_manifest(corpus_dir, label=None):
         "alphabet_size_vocab": stats.get("vocab_size"),
         "n_nodes_mechanism": inst["counts"]["mechanism_nodes"], "n_latent_nodes": inst["counts"]["mechanism_latent_nodes"],
         "counts": {**inst["counts"], "shards": len(shards), "view_rows": stats.get("rows")},
+        "exposure": exposure, "metrics": metrics, "derived_from": derived_from,
         "target_counts": {k: target.get(k) for k in ("n_directed", "n_bidirected", "n_directed_at_floor", "n_bidirected_at_floor",
                                                      "n_directed_mc", "n_bidirected_mc", "n_effects_exact", "n_effects_mc", "mc_se_max")},
         "byte_identity_excludes": list(BYTE_IDENTITY_EXCLUDES),
@@ -88,20 +104,29 @@ def build_manifest(corpus_dir, label=None):
     return manifest
 
 
-def write_manifest(corpus_dir, label=None):
-    m = build_manifest(corpus_dir, label)
+def write_manifest(corpus_dir, label=None, derived_from=None):
+    m = build_manifest(corpus_dir, label, derived_from)
     write_json(Path(corpus_dir) / MANIFEST_JSON, m)
     return m
 
 
 def refresh_manifest(corpus_dir):
     """Rewrite an existing manifest after a command adds a report to the corpus
-    (keeps the label). No-op when the corpus has no manifest yet."""
+    (keeps the label and the provenance). No-op when the corpus has no manifest yet."""
     corpus_dir = Path(corpus_dir)
     if not (corpus_dir / MANIFEST_JSON).exists():
         return None
-    label = read_json(corpus_dir / MANIFEST_JSON).get("label")
-    return write_manifest(corpus_dir, label)
+    old = read_json(corpus_dir / MANIFEST_JSON)
+    return write_manifest(corpus_dir, old.get("label"), old.get("derived_from"))
+
+
+def finalize_corpus(corpus_dir, note, label=None, derived_from=None):
+    """The manifest hashes every shipped file (run/ excluded); COMPLETE is
+    written only after it exists. Shared by `generate` and `derive`."""
+    corpus_dir = Path(corpus_dir)
+    m = write_manifest(corpus_dir, label, derived_from)
+    (corpus_dir / COMPLETE_MARKER).write_text(note + "\n")
+    return m
 
 
 # --- verification -------------------------------------------------------------------------
@@ -196,6 +221,22 @@ def scan_names(corpus_dir, denylist=None, max_records=200000):
                         problems.append(f"{p.name}: {k}={r[k]!r} outside the public grammar")
                 for v in r.values():
                     check(v, p.name)
+    # the metrics channel and the oracle state log carry names in parquet columns (D-TB-21)
+    for d in (METRICS_DIR, ORACLE_STATE_DIR):
+        for p in sorted((corpus_dir / d).rglob("*.parquet")) if (corpus_dir / d).exists() else []:
+            t = pq.read_table(p)
+            for col in t.column_names:
+                if t.schema.field(col).type != pa.string():
+                    continue
+                for v in t.column(col).unique().to_pylist():
+                    if v is None:
+                        continue
+                    if col == "service" and not _GRAMMAR["service"].match(v):
+                        problems.append(f"{p.name}: service={v!r} outside the public grammar")
+                    if col == "endpoint" and not _GRAMMAR["path"].match(v):
+                        problems.append(f"{p.name}: endpoint={v!r} outside the public grammar")
+                    check(v, p.name)
+            seen += t.num_rows
     inst = read_json(corpus_dir / INSTANTIATION_JSON)
     for svc in inst["topology"]["services"]:
         if not _GRAMMAR["service"].match(svc["name"]):

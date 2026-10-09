@@ -1,12 +1,17 @@
 """One unattended job: generate, verify and upload the corpora of one rung.
 
     python -m tracebench.pipeline --config configs/instances/<rung>.yaml --seeds 0 [1 2 3 4] \\
-        --out data/corpora --workers 8 [--variants latent twin] [--denylist <private list>] \\
-        [--upload [--repo chadyuk/trace-bench] [--stage-dir data/hf-stage]] [--skip-existing]
+        --out data/corpora --workers 8 [--variants latent twin metrics] [--denylist <private list>] \\
+        [--upload [--repo chadyuk/trace-bench] [--stage-dir data/hf-stage]] [--skip-existing] \\
+        [--fetch-from chadyuk/trace-bench [--fetch-revision v0.3.0]]
 
-Per seed it generates the latent instance and its fully-observable twin, then
-verifies each against its own manifest and the public name grammar (and the
-private denylist when one is given, which is what makes a corpus "verified").
+Per seed it generates the latent instance and its fully-observable twin, derives
+the metrics variant from the latent corpus (D-TB-21), then verifies each against
+its own manifest and the public name grammar (and the private denylist when one
+is given, which is what makes a corpus "verified"). A metrics-only job
+(`--variants metrics`) needs the seed's latent corpus under `--out`: with
+`--fetch-from` it is pulled from the dataset host first (at `--fetch-revision`),
+verified, and never re-uploaded.
 With `--upload`, one `publish upload` puts every corpus of the job on the
 dataset host once they have all verified — no release metadata and no tag, so
 independent jobs accumulate the corpora of one release (see `publish`).
@@ -30,11 +35,12 @@ import traceback
 from pathlib import Path
 
 from .config import ConfigError, load_instance_config
-from .constants import COMPLETE_MARKER, VARIANTS, VARIANT_LATENT, VARIANT_TWIN
+from .constants import COMPLETE_MARKER, DERIVED_FROM, GENERATED_VARIANTS, VARIANTS
+from .derive import DeriveRefused, derive
 from .generate import CapExceeded, corpus_dir_for, generate
 from .log import log
 from .manifest import verify
-from .publish import DEFAULT_REPO, upload
+from .publish import DEFAULT_REPO, DEFAULT_REVISION, fetch, upload
 from .record import RunRecord
 
 EXIT_OK = 0
@@ -90,12 +96,19 @@ def _label(instance, variant, seed):
 
 
 def run_pipeline(config_path, seeds, out, workers=1, variants=VARIANTS, denylist=None, upload_to=None,
-                 stage_dir=None, skip_existing=False, upload_fn=None, record=True):
-    """Generate, verify and (optionally) upload every (seed, variant) of one rung.
+                 stage_dir=None, skip_existing=False, upload_fn=None, record=True,
+                 fetch_from=None, fetch_revision=DEFAULT_REVISION, fetch_fn=None, derive_fn=None):
+    """Generate or derive, verify and (optionally) upload every (seed, variant) of one rung.
 
     `upload_to` is the dataset repository, or None to skip the upload;
-    `upload_fn` replaces `publish.upload` (the tests pass a stub).
+    `upload_fn` replaces `publish.upload`, `fetch_fn` replaces `publish.fetch`
+    and `derive_fn` replaces `derive.derive` (the tests pass stubs). Variants
+    run in canonical order per seed, so a derived variant finds its source.
     """
+    unknown = sorted(set(variants) - set(VARIANTS))
+    if unknown:
+        raise ConfigError(f"unknown variants {unknown}; known: {VARIANTS}")
+    variants = [v for v in VARIANTS if v in set(variants)]
     cfg = load_instance_config(config_path)
     instance = cfg.name
     out = Path(out)
@@ -104,10 +117,11 @@ def run_pipeline(config_path, seeds, out, workers=1, variants=VARIANTS, denylist
                     {"config": str(config_path), "seeds": list(seeds), "out": str(out), "workers": workers,
                      "variants": list(variants), "denylist": str(denylist) if denylist else None,
                      "upload_to": upload_to, "stage_dir": str(stage_dir) if stage_dir else None,
-                     "skip_existing": skip_existing}) if record else None
+                     "skip_existing": skip_existing, "fetch_from": fetch_from,
+                     "fetch_revision": fetch_revision if fetch_from else None}) if record else None
     corpora = []
     results = {"instance": instance, "seeds": list(seeds), "variants": list(variants), "corpora": [],
-               "uploaded": None, "steps": steps.records}
+               "fetched": [], "uploaded": None, "steps": steps.records}
 
     def finish(status):
         results["step_counts"] = steps.counts()
@@ -117,24 +131,47 @@ def run_pipeline(config_path, seeds, out, workers=1, variants=VARIANTS, denylist
              "corpora": len(results["corpora"])})
         return results
 
+    def verified(label, corpus_dir):
+        v = steps.run("verify", label, lambda: verify(corpus_dir, denylist))
+        if not (v["manifest_ok"] and v["names_ok"]):
+            for problem in (v["manifest_problems"] + v["name_problems"])[:20]:
+                log({"event": "verify_problem", "corpus": label, "problem": problem})
+            raise StepFailed(f"{label}: verification failed "
+                             f"({len(v['manifest_problems'])} manifest, {len(v['name_problems'])} name problems)")
+        return v
+
     try:
         for seed in seeds:
             for variant in variants:
                 label = _label(instance, variant, seed)
                 corpus_dir = corpus_dir_for(out, instance, variant, seed)
-                if skip_existing and (corpus_dir / COMPLETE_MARKER).exists():
-                    steps.skip("generate", label, "COMPLETE exists")
+                if variant in GENERATED_VARIANTS:
+                    if skip_existing and (corpus_dir / COMPLETE_MARKER).exists():
+                        steps.skip("generate", label, "COMPLETE exists")
+                    else:
+                        res = steps.run("generate", label, lambda: generate(
+                            config_path, seed, out, variant=variant, workers=workers))
+                        if not res["complete"]:
+                            raise StepFailed(f"{label}: generation did not complete")
                 else:
-                    res = steps.run("generate", label, lambda: generate(
-                        config_path, seed, out, twin=(variant == VARIANT_TWIN), workers=workers))
-                    if not res["complete"]:
-                        raise StepFailed(f"{label}: generation did not complete")
-                v = steps.run("verify", label, lambda: verify(corpus_dir, denylist))
-                if not (v["manifest_ok"] and v["names_ok"]):
-                    for problem in (v["manifest_problems"] + v["name_problems"])[:20]:
-                        log({"event": "verify_problem", "corpus": label, "problem": problem})
-                    raise StepFailed(f"{label}: verification failed "
-                                     f"({len(v['manifest_problems'])} manifest, {len(v['name_problems'])} name problems)")
+                    source_variant = DERIVED_FROM[variant]
+                    source_label = _label(instance, source_variant, seed)
+                    source_dir = corpus_dir_for(out, instance, source_variant, seed)
+                    if not (source_dir / COMPLETE_MARKER).exists():
+                        if not fetch_from:
+                            raise StepFailed(f"{label}: needs the complete {source_label} under {out}; "
+                                             f"include {source_variant!r} in --variants or pass --fetch-from")
+                        steps.run("fetch", source_label, lambda: (fetch_fn or fetch)(
+                            source_label, out, repo=fetch_from, revision=fetch_revision))
+                        verified(source_label, source_dir)
+                        results["fetched"].append(source_label)
+                    if skip_existing and (corpus_dir / COMPLETE_MARKER).exists():
+                        steps.skip("derive", label, "COMPLETE exists")
+                    else:
+                        res = steps.run("derive", label, lambda: (derive_fn or derive)(source_dir, variant, out))
+                        if not res["complete"]:
+                            raise StepFailed(f"{label}: derivation did not complete")
+                v = verified(label, corpus_dir)
                 corpora.append(str(corpus_dir))
                 results["corpora"].append({"path": str(corpus_dir), "label": label,
                                            "records_scanned": v["records_scanned"],
@@ -143,7 +180,7 @@ def run_pipeline(config_path, seeds, out, workers=1, variants=VARIANTS, denylist
             fn = upload_fn or upload
             results["uploaded"] = steps.run("upload", f"{instance} x{len(corpora)}",
                                             lambda: fn(corpora, repo=upload_to, stage_dir=stage_dir))
-    except (ConfigError, CapExceeded) as e:
+    except (ConfigError, CapExceeded, DeriveRefused) as e:
         results["refused"] = str(e)
         finish("refused")
         raise
@@ -160,13 +197,16 @@ def build_parser():
     p.add_argument("--seeds", required=True, type=int, nargs="+")
     p.add_argument("--out", required=True)
     p.add_argument("--workers", type=int, default=1)
-    p.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=[VARIANT_LATENT, VARIANT_TWIN])
+    p.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS))
     p.add_argument("--denylist", default=None, help="private JSON {names: [...]} that must not appear in a corpus")
     p.add_argument("--upload", action="store_true", help="upload every corpus of this job after they all verify")
     p.add_argument("--repo", default=DEFAULT_REPO)
     p.add_argument("--stage-dir", default=None,
                    help="hard-link staging tree for the upload; keep it OUTSIDE --out so it is not copied with the corpora")
     p.add_argument("--skip-existing", action="store_true", help="do not regenerate a corpus already marked COMPLETE")
+    p.add_argument("--fetch-from", default=None,
+                   help="dataset repository to pull a derived variant's source corpus from when it is not under --out")
+    p.add_argument("--fetch-revision", default=DEFAULT_REVISION, help="revision (tag) to fetch from, e.g. v0.3.0")
     return p
 
 
@@ -175,8 +215,9 @@ def main(argv=None):
     try:
         run_pipeline(args.config, args.seeds, args.out, workers=args.workers, variants=args.variants,
                      denylist=args.denylist, upload_to=args.repo if args.upload else None,
-                     stage_dir=args.stage_dir, skip_existing=args.skip_existing)
-    except (ConfigError, CapExceeded) as e:
+                     stage_dir=args.stage_dir, skip_existing=args.skip_existing,
+                     fetch_from=args.fetch_from, fetch_revision=args.fetch_revision)
+    except (ConfigError, CapExceeded, DeriveRefused) as e:
         log({"event": "pipeline_refused", "reason": str(e)})
         return EXIT_REFUSED
     except Exception as e:

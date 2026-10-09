@@ -774,6 +774,55 @@ mechanism). Because the pair differs only in what is *observed*, the score gap
 between a method's twin result and its latent result **isolates the cost of
 latent confounding** as a published number.
 
+### 9.1 The metrics variant: what an operator actually sees
+
+Real operators sit between the two. A cluster exports its infrastructure state
+as **metric time series** — request rate, CPU-like load, connection-pool
+occupancy, readiness — on a regular scrape grid of tens of seconds, labelled by
+service (and endpoint where the metric has one), stored as instantaneous
+samples; it does not export cache contents or a session's network and auth
+state. The **metrics variant** (D-TB-21) gives a method exactly that. Its
+**exposure profile** (a tool constant, `constants.EXPOSURE_PROFILES`, never
+part of the configuration — so `config_hash` is the same for every variant of
+one instance) observes `intensity`, `load`, `pool` and `health` and hides
+`cache`, `net` and `auth`.
+
+The channel is a separate, method-readable directory `metrics/`, never a
+token in the event sequence: long-format samples `(ts_ms, family, service,
+endpoint, value)` every 30 s, one series per `(family, service[, endpoint])`
+(service-level, no per-pod replication), the value being the mechanism's
+**categorical level** (`load: high`), and a catalogue `series.json` that names
+each series' state-token stem (`state:load:3`), so a method can emit the state
+tokens the target uses without reading `graphs/`. `ts_ms` is on the clock the
+raw feed's true emission times are on; the series carry no skew. A sample is
+the state the engine used for the hops of that tick, fault injection included.
+Numeric gauges were rejected on purpose: the mechanism carries levels, and a
+fitted gauge would be an invented quantity a method would then have to
+re-discretise.
+
+Sampling is **lossy by design**: the tick-level chains flip faster than a
+scrape, and a value that flips and flips back between two scrapes never shows.
+The oracle keeps the full change log (`oracle/state/`, not method-readable)
+with a per-change `visible_at_scrape` flag, and `sampling.json` publishes the
+share of changes the channel missed, per group — on `xs` seed 0 about a third
+of load changes and a seventh of health changes.
+
+The variant is **derived, not re-simulated**: the latent chain is a pure
+function of the instantiation and the seed, so `tracebench.derive` hard-links
+the latent corpus's raw feed, views, oracle, labels and topology (byte-identical
+to the published latent corpus, which `manifest.derived_from` names), recomputes
+the chain, samples it, and re-derives the ground truth under the partial
+exposure. That target is the **partial projection**: the hidden groups form the
+through set and project to bidirected edges exactly as on the latent instance,
+the exposed groups are state-token *sources*, and an exposed latent reaches a
+token only along hidden or derived intermediates (an observed intermediate cuts
+the path — the latent-projection semantics of §6). State tokens are sources
+only, never destinations: the rule the 0.3.0 twin was computed under, made
+explicit. The target therefore still carries bidirected edges, so the
+causal-validity axis is not applicable, with the hidden groups named in the
+reason. The triple `latent / metrics / twin` turns "what does partial
+observability cost a method" into a published number per rung.
+
 ---
 
 ## 10. Determinism, shards and the forcing hook
