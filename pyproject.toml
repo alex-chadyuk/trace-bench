@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-publish = ["huggingface_hub>=0.30"]
+publish = ["huggingface_hub>=0.30,<2"]   # 2.x drops HfApi.upload_large_folder (xs-all job, 2026-10-09)
 sid = ["gadjid>=0.1.0"]
 dev = ["pytest>=8"]
 

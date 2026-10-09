@@ -22,6 +22,7 @@ against pulled manifests that one file is allowed to differ when
 `derived_from.tool_version` is not the frozen tool version (D-TB-21).
 """
 import os
+import warnings
 from pathlib import Path
 
 import pytest
@@ -80,12 +81,20 @@ def test_xs_seed0_matches_the_frozen_checksums():
     manifests = _manifests_from(pulled) if pulled else _regenerated()
     assert manifests, f"no manifest found in {pulled}" if pulled else "no corpus regenerated"
     missing = sorted(set(frozen["corpora"]) - set(manifests))
-    assert not missing, f"the fixture pins corpora that are not here: {missing}"
     if not pulled:
         # a local run produces exactly the pinned corpora and nothing else
+        assert not missing, f"the fixture pins corpora that are not here: {missing}"
         assert set(manifests) == set(frozen["corpora"])
+    elif missing:
+        # a pulled directory may hold a subset: a job derives one variant from
+        # corpora published earlier (the metrics jobs of 0.4.0), so the pinned
+        # corpora it did not produce are reported, not required
+        present = sorted(set(frozen["corpora"]) & set(manifests))
+        assert present, f"none of the pinned corpora is under {pulled}: {sorted(frozen['corpora'])}"
+        warnings.warn(f"byte identity checked for {present}; pinned corpora not in the pull: {missing}")
     for key in sorted(frozen["corpora"]):
-        _compare(frozen, manifests, key)
+        if key in manifests:
+            _compare(frozen, manifests, key)
 
 
 def test_the_fixture_pins_every_variant_of_seed_zero():
