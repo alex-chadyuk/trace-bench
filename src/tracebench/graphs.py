@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .constants import (
     ALPHABET_JSON, CHANGEPOINTS_JSON, FLOOR_SENSITIVITY_JSON, GRAPHS_DIR, MECHANISM_GRAPH_JSON,
-    SCORING_TARGET_JSON, VARIANT_TWIN, VIEW_ENDPOINT_JSON, VIEW_SERVICE_JSON,
+    SCORING_TARGET_JSON, VARIANTS, VIEW_ENDPOINT_JSON, VIEW_SERVICE_JSON,
 )
 from .instantiate import Instantiation, load_instantiation
 from .log import log
@@ -87,10 +87,11 @@ def write_target_artifacts(inst: Instantiation, corpus_dir, variant):
     corpus_dir = Path(corpus_dir)
     gdir = corpus_dir / GRAPHS_DIR
     gdir.mkdir(parents=True, exist_ok=True)
-    twin = variant == VARIANT_TWIN
-    alphabet = build_alphabet(inst, twin=twin)
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}; one of {VARIANTS}")
+    alphabet = build_alphabet(inst, variant=variant)
     write_json(gdir / ALPHABET_JSON, alphabet)
-    req, ses, _ = build_targets(inst, twin=twin)
+    req, ses, _ = build_targets(inst, variant=variant)
     write_json(gdir / SCORING_TARGET_JSON, req)
     write_json(gdir / SCORING_TARGET_SESSION_JSON, ses)
     write_json(gdir / FLOOR_SENSITIVITY_JSON, floor_sensitivity(req, inst.cfg.mechanism.sweep))
@@ -113,7 +114,7 @@ def write_graph_artifacts(inst: Instantiation, corpus_dir, variant):
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--corpus", required=True, help="corpus directory holding instantiation.json, config.yaml, constants.json")
-    p.add_argument("--variant", required=True, choices=["latent", "twin"], help="which variant's targets to derive")
+    p.add_argument("--variant", required=True, choices=list(VARIANTS), help="which variant's targets to derive")
     return p
 
 

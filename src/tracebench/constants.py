@@ -118,7 +118,48 @@ GRAINS = ("request", "session")
 SPLITS = ("train", "val", "test")
 VARIANT_LATENT = "latent"
 VARIANT_TWIN = "twin"
-VARIANTS = (VARIANT_LATENT, VARIANT_TWIN)
+VARIANT_METRICS = "metrics"
+VARIANTS = (VARIANT_LATENT, VARIANT_TWIN, VARIANT_METRICS)
+# Variants the generator simulates; every other variant is derived from one of
+# these by `tracebench.derive` (D-TB-21).
+GENERATED_VARIANTS = (VARIANT_LATENT, VARIANT_TWIN)
+DERIVED_FROM = {VARIANT_METRICS: VARIANT_LATENT}
+
+# --- exposure profiles (D-TB-21) ----------------------------------------------------
+# The mechanism's latent node groups, and per variant the groups whose values a
+# method may observe. A profile is a tool property (like the projection cap):
+# it never enters the instance configuration, so `config_hash` is the same for
+# every variant of one instance. The latent instance exposes nothing; the twin
+# exposes everything; the metrics variant exposes what a real cluster exports
+# as metric time series (traffic, load, pool occupancy, endpoint health) and
+# hides what it does not (cache contents, per-session network and auth state).
+LATENT_GROUPS = ("intensity", "load", "pool", "cache", "health", "net", "auth")
+EXPOSURE_PROFILES = {
+    VARIANT_LATENT: (),
+    VARIANT_TWIN: LATENT_GROUPS,
+    VARIANT_METRICS: ("intensity", "load", "pool", "health"),
+}
+
+
+def exposed_groups(variant):
+    return frozenset(EXPOSURE_PROFILES[variant])
+
+
+def hidden_groups(variant):
+    return frozenset(LATENT_GROUPS) - exposed_groups(variant)
+
+
+# The metrics channel: one series per (family, service[, endpoint]) sampled on a
+# regular scrape grid, long-format rows, categorical levels (the truth node's
+# value). The oracle keeps the tick-resolution change log beside it.
+METRICS_DIR = "metrics"
+METRICS_SERIES_JSON = "series.json"
+METRICS_SAMPLES_PARQUET = "samples.parquet"
+METRICS_SCHEMA = "tracebench/metrics@1"
+METRICS_SCRAPE_S = 30
+METRIC_FAMILIES = {"intensity": "traffic_intensity", "load": "service_load", "pool": "pool_state", "health": "endpoint_health"}
+STATE_CHANGES_PARQUET = "changes.parquet"
+STATE_SAMPLING_JSON = "sampling.json"
 
 # --- corpus layout ------------------------------------------------------------------
 RUN_DIR = "run"
@@ -165,8 +206,9 @@ MECHANISM_CHECK_JSON = "mechanism-check.json"
 TOPOLOGY_VS_TARGET_JSON = "topology-vs-target.json"
 ESTIMATE_JSON = "estimate.json"
 
-# The only corpus prefixes a method under evaluation may read (PRD scenario 25).
-METHOD_READABLE_PREFIXES = ("raw/", "views/")
+# The only corpus prefixes a method under evaluation may read (PRD scenario 25);
+# `metrics/` is the metrics variant's channel (D-TB-21). `oracle/state/` is not.
+METHOD_READABLE_PREFIXES = ("raw/", "views/", "metrics/")
 
 # Mechanism node groups whose values reach an emitted record in the latent
 # instance: attempts (access records), client outcomes (client-side records),

@@ -5,9 +5,12 @@ Every command writes `run/arguments.json`, `run/results.json` and
 byte-identity claim (it carries wall-clock and host facts); everything else
 must be a pure function of configuration, seed, tool version and constants.
 """
+import errno
 import hashlib
 import json
+import os
 import platform
+import shutil
 import sys
 from pathlib import Path
 
@@ -27,17 +30,35 @@ def canonical_hash(obj, digest_size=16):
 
 
 def write_json(path, obj, indent=1):
-    """Deterministic pretty JSON (sorted keys, fixed indent, trailing newline)."""
+    """Deterministic pretty JSON (sorted keys, fixed indent, trailing newline).
+    Streamed through `json.dump`: the same bytes `json.dumps` would give, without
+    materialising the text (the xl session target is several GB; 0.4.0)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(obj, sort_keys=True, indent=indent, ensure_ascii=False, allow_nan=False) + "\n"
-    path.write_text(text, encoding="utf-8")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, sort_keys=True, indent=indent, ensure_ascii=False, allow_nan=False)
+        f.write("\n")
     return path
 
 
 def read_json(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def link_or_copy(src, dst):
+    """Hard-link `src` at `dst` (free in space, identical in bytes); copy when
+    the filesystem refuses. Returns "linked" or "copied"."""
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)
+        return "linked"
+    except OSError as e:
+        if e.errno not in (errno.EXDEV, errno.EPERM, errno.EMLINK):
+            raise
+        shutil.copy2(src, dst)   # a different filesystem: pay the copy
+        return "copied"
 
 
 def sha256_file(path, chunk=1 << 20):

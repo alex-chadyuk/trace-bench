@@ -4,6 +4,12 @@
         [--corpus-root <dir>] [--repo chadyuk/trace-bench] [--stage-dir <dir>] \\
         [--workers N] [--replace] [--keep-stage] [--dry-run]
     python -m tracebench.publish release --version vX.Y.Z [--repo chadyuk/trace-bench] [--dry-run]
+    python -m tracebench.publish fetch --corpus-key <instance>/<variant>/seed=<k> --out <root> \\
+        [--repo chadyuk/trace-bench] [--revision v0.3.0] [--workers N]
+
+`fetch` pulls one corpus from the host into `<out>/<instance>/<variant>/seed=<k>`
+and verifies it against its own manifest before it lands (what `derive` and a
+metrics-only `pipeline` job read; D-TB-21).
 
 `upload` puts one or more complete corpora on the dataset's default branch at
 `instances/<name>/<variant>/seed=<s>/...` and is what an unattended generation
@@ -30,8 +36,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import errno
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -40,14 +46,16 @@ from pathlib import Path
 from . import __version__
 from .constants import COMPLETE_MARKER, MANIFEST_JSON, RUN_DIR
 from .log import log
-from .manifest import verify_manifest
-from .record import read_json, write_json
+from .manifest import corpus_key, verify_manifest
+from .record import link_or_copy, read_json, write_json
 
 DEFAULT_REPO = "chadyuk/trace-bench"
 REPO_TYPE = "dataset"
 DEFAULT_REVISION = "main"
 INSTANCES_PREFIX = "instances"
 STAGE_DIR_NAME = ".hf-stage"
+FETCH_DIR_NAME = ".hf-fetch"
+CORPUS_KEY_RE = re.compile(r"^(?P<instance>[a-z][a-z0-9]*)/(?P<variant>[a-z]+)/seed=(?P<seed>\d+)$")
 # Never uploaded: the run record (host, wall clock, argv) is not part of a
 # corpus, and artifacts.json names the private object store (PRD scenario 20).
 NOT_UPLOADED = (RUN_DIR + "/", "artifacts.json")
@@ -89,15 +97,28 @@ oracle linkage that makes correlation loss a measured quantity. Every corpus
 is wholly synthetic and reproduces byte-identically from its configuration,
 seed, tool version and constants version (see each `manifest.json`).
 
+Three variants per instance and seed, one simulation. `latent`: no state
+variable is observable. `twin`: every latent value is written onto the records
+it influenced, with a state-change log; its target is a DAG over event and state
+tokens. `metrics`: the latent corpus plus a method-readable channel `metrics/`
+of 30-second categorical time series of traffic intensity, per-service load and
+pool state and per-endpoint health — what a real cluster exports — while cache
+contents and per-session network and auth state stay hidden; it is derived from
+the latent corpus of the same seed (`manifest.derived_from`), and its target is
+the partial projection: state tokens of the exposed groups as sources, bidirected
+edges only through the hidden groups. The score gap across the three isolates
+what each degree of observability costs a method.
+
 Generator (MIT): https://github.com/alex-chadyuk/trace-bench — tool version {tool_version}.
 Corpus licence: CC BY 4.0. Fitted realism constants: {constants}.
 
-| instance | variant | seed | alphabet (realized, train) | mechanism nodes | directed / bidirected at floor | edges on a Monte-Carlo estimate (max SE) |
-|---|---|---|---|---|---|---|
+| instance | variant | seed | exposed / hidden latent groups | alphabet (realized, train) | mechanism nodes | directed / bidirected at floor | edges on a Monte-Carlo estimate (max SE) |
+|---|---|---|---|---|---|---|---|
 {rows}
 
-To score a method: read only `raw/` and `views/`; score against
-`graphs/scoring-target.json` (request grain) with `python -m tracebench.score`.
+To score a method: read only `raw/`, `views/` and (metrics variant) `metrics/`;
+score against `graphs/scoring-target.json` (request grain) with
+`python -m tracebench.score`.
 
 Scoring-target strengths are exact marginalisations of the mechanism, except
 where the exact frontier of one (source, destination) chain exceeds the tool's
@@ -118,7 +139,13 @@ def _row(m):
         mc = "n/a"
     else:
         mc = f"{tc['n_directed_mc']} / {tc['n_bidirected_mc']} ({tc.get('mc_se_max')})"
-    return f"| {m['instance']} | {m['variant']} | {m['seed']} | {m.get('alphabet_size_realized_train')} | {m.get('n_nodes_mechanism')} | {tc.get('n_directed_at_floor')} / {tc.get('n_bidirected_at_floor')} | {mc} |"
+    ex = m.get("exposure")
+    if ex:
+        exposure = f"{', '.join(ex['exposed_groups']) or 'none'} / {', '.join(ex['hidden_groups']) or 'none'}"
+    else:
+        exposure = {"latent": "none / all", "twin": "all / none"}.get(m["variant"], "n/a")
+    return (f"| {m['instance']} | {m['variant']} | {m['seed']} | {exposure} | {m.get('alphabet_size_realized_train')} | "
+            f"{m.get('n_nodes_mechanism')} | {tc.get('n_directed_at_floor')} / {tc.get('n_bidirected_at_floor')} | {mc} |")
 
 
 def path_in_repo(manifest):
@@ -165,13 +192,7 @@ def default_stage_dir(entries):
 
 
 def _link(src, dst):
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.link(src, dst)
-    except OSError as e:
-        if e.errno not in (errno.EXDEV, errno.EPERM, errno.EMLINK):
-            raise
-        shutil.copy2(src, dst)   # a different filesystem: pay the copy
+    link_or_copy(src, dst)
 
 
 def _stage(entries, stage_root):
@@ -318,9 +339,64 @@ def plan_release(api, repo, version, tmp):
                           "config_hash": e["manifest"]["config_hash"],
                           "constants_version": e["manifest"]["constants_version"],
                           "tool_version": e["manifest"]["tool_version"],
-                          "n_files": len(e["manifest"]["files"])}
+                          "n_files": len(e["manifest"]["files"]),
+                          "derived_from": (e["manifest"].get("derived_from") or {}).get("corpus_key")}
                          for e in sorted(entries, key=lambda e: e["path_in_repo"])]}
     return entries, card, index
+
+
+# --- fetch --------------------------------------------------------------------------------
+def fetch(key, out, repo=DEFAULT_REPO, revision=DEFAULT_REVISION, workers=None, download_fn=None):
+    """Pull one corpus (`<instance>/<variant>/seed=<k>`) from the host into
+    `<out>/<instance>/<variant>/seed=<k>`. The download lands in a scratch
+    directory beside the corpus root, is verified against its own manifest and
+    checked for the identity it claims, and only then moved into place — the
+    hub's own cache files never enter the corpus. `download_fn` replaces
+    `huggingface_hub.snapshot_download` (the tests pass a stub)."""
+    m = CORPUS_KEY_RE.match(key)
+    if not m:
+        raise ValueError(f"corpus key {key!r} is not <instance>/<variant>/seed=<k>")
+    out = Path(out)
+    dest = out / m["instance"] / m["variant"] / f"seed={m['seed']}"
+    if (dest / COMPLETE_MARKER).exists():
+        return {"corpus_dir": str(dest), "fetched": False, "reason": "already complete"}
+    scratch = out / FETCH_DIR_NAME / key.replace("/", "_")
+    if scratch.exists():
+        shutil.rmtree(scratch)
+    scratch.mkdir(parents=True)
+    if download_fn is None:
+        from huggingface_hub import snapshot_download
+        download_fn = snapshot_download
+    download_fn(repo_id=repo, repo_type=REPO_TYPE, revision=revision, local_dir=str(scratch),
+                allow_patterns=[f"{INSTANCES_PREFIX}/{key}/*"], max_workers=workers or 8)
+    src = scratch / INSTANCES_PREFIX / key
+    try:
+        if not (src / COMPLETE_MARKER).exists() or not (src / MANIFEST_JSON).exists():
+            raise RuntimeError(f"{key} on {repo}@{revision} is not a complete corpus (no COMPLETE or manifest)")
+        manifest = read_json(src / MANIFEST_JSON)
+        if corpus_key(manifest) != key:
+            raise RuntimeError(f"{key}: the fetched manifest claims {corpus_key(manifest)}")
+        problems = verify_manifest(src)
+        if problems:
+            raise RuntimeError(f"{key}: the fetched corpus does not verify ({len(problems)} problems): {problems[:5]}")
+        n_files = sum(1 for p in src.rglob("*") if p.is_file())
+        n_bytes = sum(p.stat().st_size for p in src.rglob("*") if p.is_file())
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            shutil.rmtree(dest)          # an incomplete earlier attempt
+        try:
+            os.replace(src, dest)
+        except OSError:
+            shutil.move(str(src), str(dest))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        try:
+            scratch.parent.rmdir()          # the fetch root, once nothing else is being fetched
+        except OSError:
+            pass
+    log({"event": "fetch", "corpus": key, "repo": repo, "revision": revision, "n_files": n_files, "bytes": n_bytes})
+    return {"corpus_dir": str(dest), "fetched": True, "repo": repo, "revision": revision,
+            "n_files": n_files, "bytes": n_bytes, "tool_version": manifest["tool_version"]}
 
 
 def release(version, repo=DEFAULT_REPO, dry_run=False, api=None):
@@ -368,6 +444,12 @@ def build_parser():
     r.add_argument("--version", required=True, help="release version, e.g. v0.2.0 (a dataset tag)")
     r.add_argument("--repo", default=DEFAULT_REPO)
     r.add_argument("--dry-run", action="store_true", help="verify the host; write nothing")
+    f = sub.add_parser("fetch", help="pull one corpus from the host into <out>/<instance>/<variant>/seed=<k>, verified")
+    f.add_argument("--corpus-key", required=True, help="<instance>/<variant>/seed=<k>, e.g. xs/latent/seed=0")
+    f.add_argument("--out", required=True, help="corpus root (the same --out a pipeline or derive run uses)")
+    f.add_argument("--repo", default=DEFAULT_REPO)
+    f.add_argument("--revision", default=DEFAULT_REVISION, help="a tag such as v0.3.0, or a branch")
+    f.add_argument("--workers", type=int, default=None, help="download workers (default 8)")
     return p
 
 
@@ -380,6 +462,8 @@ def main(argv=None):
                 raise ValueError("no corpora: pass --corpus (repeatable) or --corpus-root with complete corpora under it")
             res = upload(corpora, repo=args.repo, dry_run=args.dry_run, replace=args.replace,
                          stage_dir=args.stage_dir, workers=args.workers, keep_stage=args.keep_stage)
+        elif args.cmd == "fetch":
+            res = fetch(args.corpus_key, args.out, repo=args.repo, revision=args.revision, workers=args.workers)
         else:
             res = release(args.version, repo=args.repo, dry_run=args.dry_run)
     except (ValueError, RuntimeError) as e:

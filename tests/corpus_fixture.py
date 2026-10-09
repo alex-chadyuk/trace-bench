@@ -41,9 +41,20 @@ def xs_corpus(variant="latent", faults=True, tag="base"):
 
 
 @functools.lru_cache(maxsize=None)
+def xs_metrics_corpus(faults=True, tag="base"):
+    """Path of the metrics variant derived from `xs_corpus("latent", faults, tag)`
+    (D-TB-21), beside it under the same root."""
+    from tracebench.derive import derive
+
+    src = xs_corpus("latent", faults, tag)
+    res = derive(src, "metrics", src.parents[2])
+    return Path(res["corpus_dir"])
+
+
+@functools.lru_cache(maxsize=None)
 def shipped_xs_pipeline():
     """One `pipeline` run of the SHIPPED `configs/instances/xs.yaml` at seed 0,
-    both variants, with the upload stubbed — `(out_dir, results, upload_calls)`.
+    all three variants, with the upload stubbed — `(out_dir, results, upload_calls)`.
 
     Shared by the pipeline and byte-identity tests: the byte-identity fixture is
     frozen from the shipped configuration, and `config_hash` covers the

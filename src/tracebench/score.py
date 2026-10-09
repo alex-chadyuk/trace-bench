@@ -421,10 +421,17 @@ def _score_at_floor_dense(target, alphabet, prediction, floor, ordered=None, uno
 
 def causal_validity(target, prediction, floor, variant):
     """SID / parent-AID / ancestor-AID on the twin's DAG over tokens (gadjid).
-    Not applicable, with the reason stated, on the latent-bearing instance or
-    when either directed graph is cyclic."""
-    if variant != VARIANT_TWIN:
-        return {"value": None, "reason": "target is an ADMG with bidirected edges; SID/AID are defined over DAGs; see the observable twin"}
+    Applicable only when the target hides no latent group (the twin); not
+    applicable, with the hidden groups named, on the latent instance and on
+    partially exposed variants, or when either directed graph is cyclic.
+    Targets written before 0.4.0 carry no `hidden_groups`; the variant name
+    decides for them."""
+    hidden = target.get("hidden_groups")
+    if hidden is None:
+        hidden = [] if variant == VARIANT_TWIN else ["(unspecified)"]
+    if hidden:
+        return {"value": None, "reason": f"target is an ADMG: the hidden latent groups {hidden} project to bidirected edges; "
+                                         "SID/AID are defined over DAGs; see the observable twin"}
     td, _ = truth_sets(target, floor)
     pd, _ = prediction_sets(prediction)
     if not is_acyclic(sorted(td)):
@@ -481,6 +488,8 @@ def score_corpus(corpus_dir, prediction, floor=None, grain="request", variant=No
     ]
     result["grain"] = grain
     result["variant"] = variant
+    result["exposed_groups"] = target.get("exposed_groups")
+    result["hidden_groups"] = target.get("hidden_groups")
     return result
 
 
