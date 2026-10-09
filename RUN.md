@@ -525,6 +525,72 @@ the specification; this file records the implementation's departures from it.
     forced-rerun check (PRD 21) re-runs on `xs` with the new contexts — see the
     registry row of 2026-09-15.
   - *Guard.* `tests/test_mechanism.py::test_retry_attempts_are_held_absent_in_finals_and_following_attempts`.
+- **D-TB-21 — the `metrics` variant: a partially observable corpus with the
+  exposed latents as metric time series (2026-10-09).** The PRD knows two
+  variants, the latent instance (no state observable) and the twin (every
+  latent observed). A real cluster sits between them: it exports traffic,
+  CPU-like load, pool occupancy and endpoint health as scraped metric series
+  and never cache contents or a session's network and auth state. A third
+  variant, `metrics`, gives a method that view. Owner decisions 2026-10-09:
+  categorical levels (the truth node's value, no fitted numeric gauge); a 30 s
+  scrape grid, each sample the instantaneous level at the scrape tick after
+  fault injection, no skew; derived from the published latent corpus, not
+  re-simulated; self-contained copies on the host for all five rungs and five
+  seeds; state tokens are sources only; the streaming `json.dump` write; the
+  tick-level change log kept in the oracle.
+  - *Rule.* **Exposure profiles are tool constants** (`constants.EXPOSURE_PROFILES`,
+    `METRICS_SCRAPE_S`), never configuration: `config_hash` is the same for every
+    variant of one instance. `latent` exposes nothing, `twin` every latent group,
+    `metrics` `intensity, load, pool, health` and hides `cache, net, auth`. The
+    projector takes the exposed set: exposed latents are state-token sources, the
+    hidden ones are the through set and project to bidirected edges as on the
+    latent instance (`Projector(exposed=…)`; `twin=True` remains the spelling of
+    the twin profile). **State tokens are sources only** — the clause that would
+    have admitted a state node as a destination was dead on the 0.3.0 twin
+    (`self.latent` is empty there), so no published twin target has a state→state
+    edge; 0.4.0 makes that the rule rather than silently changing the twin. The
+    causal-validity axis applies iff the target hides no group (`hidden_groups`
+    in the target; pre-0.4.0 targets fall back to the variant name). A derived
+    corpus **hard-links every source file** except `graphs/`, `run/`,
+    `manifest.json`, `COMPLETE` and `artifacts.json`, so its raw feed, views,
+    oracle linkage, labels, topology and `instantiation.json` are byte-identical
+    to the latent corpus its manifest names in `derived_from`; it carries two
+    tool stamps (`instantiation.json` the instantiating tool, `manifest.json` the
+    deriving one), and `load_instantiation`'s hash-and-topology check is the
+    guard that the deriving tool did not move the simulation. The channel is
+    `metrics/` (method-readable, `METHOD_READABLE_PREFIXES` gains it):
+    `series.json` (cadence, families, every series with its state-token stem) and
+    per-shard `samples.parquet` long rows `(ts_ms, family, service, endpoint,
+    value)` in `(ts_ms, family, service, endpoint)` order, one series per
+    `(family, service[, endpoint])`, service-level (no per-pod replication).
+    `ts_ms` is on the feed's true-emission clock. The oracle keeps
+    `oracle/state/shard=NNNN/changes.parquet` (every latent change, exposed or
+    hidden, with `visible_at_scrape`) and `sampling.json` (the share of changes
+    invisible at the grid per group; the last interval of the window is
+    unresolved). The scrape grid must divide the tick and the shard (asserted,
+    not assumed). `derive` runs one sequential pass of the chain (minutes at xl)
+    and is projection-bound at l/xl like `generate`; `record.write_json` streams
+    through `json.dump` (byte-identical) so the xl target write fits a 64 GB box.
+  - *What moves.* New: `metrics/`, `oracle/state/`, `tracebench.derive`,
+    `publish fetch`, `pipeline --variants … metrics [--fetch-from]`, manifest keys
+    `exposure`, `metrics`, `derived_from` (additive; schema stays `manifest@1`),
+    the name scan over the channel's parquet columns. On every variant the
+    target JSON gains `exposed_groups` / `hidden_groups` and `alphabet.json` gains
+    `variant` / `exposed_groups` / `hidden_groups` and readable `service` /
+    `endpoint` / `family` fields on state tokens. **No data file moves**: the
+    published 0.3.0 latent and twin corpora stay as they are (a regenerated xs
+    latent differs from the 0.3.0 fixture in exactly `instantiation.json`,
+    `graphs/alphabet.json`, `graphs/scoring-target.json` and
+    `graphs/scoring-target-session.json`; the twin additionally in nothing else);
+    the xs fixture is re-frozen at 0.4.0 with three corpora. `generate` refuses
+    `--variant metrics` (derived only).
+  - *Release (0.4.0).* Tool version **0.4.0**; the 25 metrics corpora are derived
+    from the v0.3.0 latent corpora (fetched by tag) and uploaded beside them;
+    the dataset tag `v0.4.0` covers all 75.
+  - *Guard.* `tests/test_metrics.py::test_samples_equal_the_twin_state_on_the_grid`,
+    `tests/test_derive.py::test_linked_files_are_byte_identical_to_the_source`,
+    `tests/test_projection.py::test_partial_exposure_hides_one_group_and_exposes_another`,
+    `tests/test_score.py::test_causal_validity_not_applicable_on_the_metrics_variant_with_hidden_groups_named`.
 
 ## Implementation notes (not deviations)
 
@@ -699,3 +765,4 @@ the specification; this file records the implementation's departures from it.
 | 2026-09-13 | m | latent | 1 | same shape, `--seeds 1` | 0.2.3 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **DESTROYED by the owner** (decision Q6 of the 2026-09-13 plan) after 7 h 40 min inside the latent projection (last log line the `estimate` event); its exact frontier is bounded by 10^9.1 under the 0.2.3 order. Even finished, its target would have been superseded by D-TB-19. Nothing synced, nothing uploaded. To be re-run at 0.3.0. |
 | 2026-09-13 | l | latent | 0–4 | same shape, `--config configs/instances/l.yaml --seeds <k>` | 0.2.3 | realism-v1 | cloud, x86-64 Linux, 8 vCPU | **DESTROYED by the owner after ~50 min**, all five still at the `estimate` event: the l-rung frontiers are bounded by 10^22–10^28 under the 0.2.3 order (10^49 corrected), out of reach of any exact enumeration. Nothing synced, nothing uploaded. To be re-run at 0.3.0 (D-TB-19). |
 | 2026-09-15 | xs | latent + twin | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3 --denylist <private list>` | 0.3.0 | realism-v1 | local, macOS Apple silicon, 18 GB | complete: 49 s for the job (generate 20.1 s + 17.2 s, verify 5.6 s + 5.8 s); `verify` manifest, names and private denylist clean on both variants; parent-link F1 0.998, unattributed 1.1 %. Against the 0.2.3 fixture exactly seven files per variant differ — the five `graphs/` target artifacts (D-TB-19), `graphs/mechanism-graph.json` (D-TB-20) and `instantiation.json` — every data file is byte-identical and `config_hash` is unchanged (`1656f43b…`). Request-grain target 520 directed / 1,865 bidirected (453 / 111 at the floor), session grain 1,300 / 2,238 (716 / 274), no effect by Monte Carlo at this rung. `check_mechanism --max-edges 40 --non-edges 8` on a copy of the latent variant: 39/40 sampled edges within 0.03 (the miss is the SLOW-mediated `F:9 → A:6:0` residual, 0.533 vs 0.565, the D-TB-9 channel as at 0.2.x), non-edges 8/8 with a largest residual of 0.0012, the sampled `A:12:0 → F:12` edge reproduces its new strength of 1.0. **Re-freeze source of `tests/fixtures/xs-checksums.json` at 0.3.0** (70 / 74 files). Step-0 projection measurements at m/l/xl (no corpus generated) are tabulated in D-TB-19. |
+| 2026-10-09 | xs | latent + twin + metrics | 0 | `python -m tracebench.pipeline --config configs/instances/xs.yaml --seeds 0 --out <scratch> --workers 3` | 0.4.0 (branch `feat/metrics-variant`, uncommitted) | realism-v1 | local, macOS Apple silicon, 18 GB | complete: generate 18.7 s + 18.5 s, derive 3.6 s, verify ≈ 1 s each; `verify` manifest and names clean on all three. **Freeze source of `tests/fixtures/xs-checksums.json` at 0.4.0** (70 / 74 / 84 files; `config_hash` unchanged, `1656f43b…`). Against the 0.3.0 fixture the latent and twin corpora differ in exactly four files each — `instantiation.json` (tool version), `graphs/alphabet.json`, `graphs/scoring-target.json`, `graphs/scoring-target-session.json` (D-TB-21's added keys) — and in no data file. The metrics corpus: 25 series (1 intensity, 5 load, 5 pool, 14 health), 120 samples per series at 30 s, 84 files, every non-`graphs/` file byte-identical to the latent corpus; request target 1,026 directed / 402 bidirected (654 / 6 at the floor), session 1,806 / 484 (917 / 79), acyclic at the request grain; `self_check` perfect, causal validity N/A naming `auth, cache, net`; sampling loss (`oracle/state/sampling.json`): load 32.7 %, pool 29.6 %, health 13.3 % of changes invisible at the grid, intensity 0 (constant over the hour). |
