@@ -2,10 +2,12 @@
 twin's acyclic bidirected-free target, the floor sweep and the coarsened views."""
 import numpy as np
 
-from tracebench.constants import FLOOR_SWEEP
+import pytest
+
+from tracebench.constants import FLOOR_SWEEP, LATENT_GROUPS
 from tracebench.graphs import write_graph_artifacts
 from tracebench.mechanism import FunctionNode, StateVar
-from tracebench.projection import Projector, build_targets, coarsen, floor_sensitivity, is_acyclic
+from tracebench.projection import Projector, build_alphabet, build_targets, coarsen, floor_sensitivity, is_acyclic, resolve_exposure
 from tracebench.record import read_json
 from xs_fixture import xs_instantiation
 
@@ -99,6 +101,74 @@ def test_twin_target_is_acyclic_without_bidirected_edges():
     assert req["directed_acyclic_at_floor"]
     assert is_acyclic([(e["src"], e["dst"]) for e in req["directed"]])
     assert any(e["src"].startswith("state:") for e in req["directed"])
+    # state tokens are sources only (D-TB-21): the rule 0.3.0 computed under, now explicit
+    assert not any(e["dst"].startswith("state:") for e in req["directed"])
+    assert req["variant"] == "twin" and req["hidden_groups"] == [] and set(req["exposed_groups"]) == set(LATENT_GROUPS)
+    # `twin=True` is the pre-0.4.0 spelling of the twin profile
+    req2, ses2, _ = build_targets(inst, variant="twin")
+    assert req2["directed"] == req["directed"] and ses2["directed"] == ses["directed"]
+
+
+# --- D-TB-21: partial exposure (the metrics variant) ----------------------------------------
+def test_partial_exposure_hides_one_group_and_exposes_another():
+    """With `load` exposed and `cache` hidden, the exposed latent is a token
+    source (state token -> event token), never a destination, and the hidden
+    latent still projects to a bidirected group as on the latent instance."""
+    m = TinyMechanism()
+    m.add(FunctionNode(_tok("X", "attempt", 0, ("ok", "err")), [], lambda ctx: (0.9, 0.1)))
+    m.add(FunctionNode(_tok("L", "load", None, ("ok", "err"), latent=True), ["X"], _binary_child("X", 0.95, 0.2)))
+    m.add(FunctionNode(_tok("Y", "attempt", 1, ("ok", "err")), ["L"], _binary_child("L", 0.9, 0.3)))
+    m.add(FunctionNode(_tok("H", "cache", None, ("ok", "err"), latent=True), [], lambda ctx: (0.8, 0.2)))
+    m.add(FunctionNode(_tok("U", "attempt", 2, ("ok", "err")), ["H"], _binary_child("H", 0.95, 0.4)))
+    m.add(FunctionNode(_tok("V", "attempt", 3, ("ok", "err")), ["H"], _binary_child("H", 0.9, 0.5)))
+    proj = Projector(m, exposed={"load"})
+    assert proj.state_nodes == ["L"] and proj.latent == {"H"} and not proj.twin
+    directed, within = proj.directed_token_edges()
+    groups = proj.bidirected_groups()
+    d = {k: v["strength"] for k, v in directed.items()}
+    # L observed: the X -> L -> Y mediation is cut at L; L itself is a source
+    assert abs(d[("state:L=err", "1:err")] - abs(0.3 - 0.9)) < 1e-9
+    assert ("0:err", "1:err") not in d
+    assert not any(k[1].startswith("state:") for k in d)          # sources only
+    assert ("0:err", "state:L=err") not in d
+    # H hidden: one bidirected group over U's and V's tokens, exactly as on the latent instance
+    assert len(groups) == 1 and groups[0]["latent"] == "H" and set(groups[0]["members"]) == {"2:ok", "2:err", "3:ok", "3:err"}
+    # the latent instance of the same mechanism keeps the mediated X -> Y edge and no state token
+    d0 = {k: v["strength"] for k, v in Projector(m).directed_token_edges()[0].items()}
+    assert ("0:err", "1:err") in d0 and not any("state:" in k[0] for k in d0)
+
+
+def test_unknown_exposure_group_is_refused():
+    with pytest.raises(ValueError):
+        resolve_exposure(exposed={"cpu"})
+    assert resolve_exposure(variant="metrics") == ("metrics", frozenset({"intensity", "load", "pool", "health"}))
+    assert resolve_exposure(twin=True)[0] == "twin" and resolve_exposure()[0] == "latent"
+    assert resolve_exposure(exposed={"load"})[0] == "custom"
+
+
+def test_xs_metrics_target_mixes_state_sources_and_hidden_confounding():
+    inst = xs_instantiation()
+    mech = inst.mechanism
+    req, ses, _ = build_targets(inst, variant="metrics")
+    assert req["variant"] == "metrics" and req["exposed_groups"] == ["health", "intensity", "load", "pool"]
+    assert req["hidden_groups"] == ["auth", "cache", "net"]
+    exposed_ids = {n for n in mech.latent_ids() if mech.nodes[n].var.group in ("intensity", "load", "pool", "health")}
+    hidden_ids = set(mech.latent_ids()) - exposed_ids
+    assert req["n_bidirected"] > 0 and all(e["via"] in hidden_ids for e in req["bidirected"])
+    assert all(g["latent"] in hidden_ids for g in req["bidirected_groups"])
+    state_srcs = {e["src"] for e in req["directed"] if e["src"].startswith("state:")}
+    assert state_srcs and all(s[len("state:"):].split("=")[0] in exposed_ids for s in state_srcs)
+    assert not any(e["dst"].startswith("state:") for e in req["directed"] + ses["directed"])
+    assert req["directed_acyclic_at_floor"]
+    # the alphabet names the exposed state tokens with their service / endpoint
+    alphabet = build_alphabet(inst, variant="metrics")
+    st = [t for t in alphabet["tokens"] if t.get("state_var")]
+    assert {t["group"] for t in st} == {"intensity", "load", "pool", "health"}
+    assert all(t["service"] for t in st if t["group"] != "intensity") and all(t["endpoint"] for t in st if t["group"] == "health")
+    assert alphabet["hidden_groups"] == ["auth", "cache", "net"]
+    # the latent instance's target is unchanged by the registry: no state token, every latent hidden
+    req0, _, _ = build_targets(inst)
+    assert req0["variant"] == "latent" and req0["exposed_groups"] == [] and len(req0["hidden_groups"]) == 7
 
 
 def test_floor_sweep_and_default_floor(tmp_path):

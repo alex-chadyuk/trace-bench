@@ -3,8 +3,15 @@
 Vocabulary. Mechanism nodes fall into three classes: token-bearing observables
 (attempt and client outcomes — their values are `(operation, outcome)` event
 types), derived observables (invocation and final variables — deterministic
-functions of observables carrying no token of their own) and latents. On the
-observable twin every latent is observed and its values are state tokens.
+functions of observables carrying no token of their own) and latents. A
+variant's exposure profile (constants.EXPOSURE_PROFILES, D-TB-21) names the
+latent groups that are observed: on the observable twin every latent is
+observed and its values are state tokens; on the metrics variant four groups
+are; on the latent instance none. An exposed latent is a token source and
+never a destination (state tokens are sources only — the 0.3.0 twin rule made
+explicit in D-TB-21); the hidden latents are the through set, so an exposed
+latent reaches a token only along hidden or derived intermediates and the
+hidden ones project to bidirected edges exactly as on the latent instance.
 
 Projection (Verma 1993 / Richardson ADMG, over the summary graph). For
 token-bearing X, Y: a directed edge X -> Y exists iff a directed path X ... Y
@@ -58,8 +65,9 @@ from fractions import Fraction
 import numpy as np
 
 from .constants import (
-    CLIENT_T_VALUES, GRAINS, KIND_BFF, KIND_CLIENT, KIND_EXTERNAL, KIND_SERVICE, MC_DECIMALS,
-    PROJECTION_CAP_PARTICLES, PROJECTION_MC_N, T_VALUES,
+    CLIENT_T_VALUES, EXPOSURE_PROFILES, GRAINS, KIND_BFF, KIND_CLIENT, KIND_EXTERNAL, KIND_SERVICE,
+    LATENT_GROUPS, MC_DECIMALS, METRIC_FAMILIES, PROJECTION_CAP_PARTICLES, PROJECTION_MC_N, T_VALUES,
+    VARIANT_LATENT, VARIANT_TWIN,
 )
 from .hashing import D_PROJECTION, uniforms
 from .mechanism import Mechanism
@@ -80,14 +88,33 @@ def state_token_key(var_id, value):
     return f"state:{var_id}={value}"
 
 
+def resolve_exposure(variant=None, twin=False, exposed=None):
+    """(variant name, frozenset of exposed latent groups). `variant` names a
+    profile; `twin=True` is the pre-0.4.0 spelling of the twin profile; an
+    explicit `exposed` set wins and is named by the profile it equals, else
+    "custom". Unknown groups are an error."""
+    if exposed is not None:
+        exposed = frozenset(exposed)
+    elif variant is not None:
+        exposed = frozenset(EXPOSURE_PROFILES[variant])
+    else:
+        exposed = frozenset(LATENT_GROUPS) if twin else frozenset()
+    unknown = exposed - set(LATENT_GROUPS)
+    if unknown:
+        raise ValueError(f"unknown latent groups {sorted(unknown)}; known: {LATENT_GROUPS}")
+    if variant is None:
+        variant = next((v for v, g in EXPOSURE_PROFILES.items() if frozenset(g) == exposed), "custom")
+    return variant, exposed
+
+
 class Projector:
     def __init__(self, mech: Mechanism, grain="request", twin=False, prune=PRUNE,
-                 cap=PROJECTION_CAP_PARTICLES, mc_n=PROJECTION_MC_N):
+                 cap=PROJECTION_CAP_PARTICLES, mc_n=PROJECTION_MC_N, exposed=None):
         if grain not in GRAINS:
             raise ValueError(f"grain must be one of {GRAINS}, got {grain!r}")
         self.mech = mech
         self.grain = grain
-        self.twin = bool(twin)
+        _, self.exposed = resolve_exposure(twin=twin, exposed=exposed)
         self.prune = prune
         self.cap = None if cap is None else int(cap)
         self.mc_n = int(mc_n)
@@ -98,12 +125,16 @@ class Projector:
                     self.children[pid].append(cid)
         self.pos = {nid: i for i, nid in enumerate(mech.order)}
         self.token_nodes = [nid for nid in mech.order if mech.nodes[nid].var.group in TOKEN_GROUPS]
-        self.latent = set() if self.twin else set(mech.latent_ids())
+        # exposed latents are token sources; the rest (`latent`) are hidden and
+        # form the through set together with the derived nodes
+        self.state_nodes = [nid for nid in mech.latent_ids() if mech.nodes[nid].var.group in self.exposed]
+        self.state_node_set = set(self.state_nodes)
+        self.latent = set(mech.latent_ids()) - self.state_node_set
+        self.twin = not self.latent           # nothing hidden
         self.derived = {nid for nid in mech.order if mech.nodes[nid].var.derived}
         self.through = self.latent | self.derived
         if grain == "request":
             self.through = {n for n in self.through if not n.startswith(CROSS_REQUEST_PREFIX)}
-        self.state_nodes = list(mech.latent_ids()) if self.twin else []
         self._vals_index = {nid: {v: i for i, v in enumerate(n.var.values)} for nid, n in mech.nodes.items()}
         self._effect_cache = {}     # (src, value, dst) -> (pmf, meta | None)
         self._chain_cache = {}      # (src, dst) -> (ordered intermediates, later-parent sets)
@@ -416,12 +447,9 @@ class Projector:
             if value == "absent":
                 return None
             return token_key(node.var.token_op, value)
-        if self.twin and nid in self.latent_all():
+        if nid in self.state_node_set:
             return state_token_key(nid, value)
         return None
-
-    def latent_all(self):
-        return set(self.mech.latent_ids())
 
     def sources(self):
         return list(self.token_nodes) + list(self.state_nodes)
@@ -444,8 +472,8 @@ class Projector:
                 if dst == src:
                     continue
                 dnode = mech.nodes[dst]
-                if dnode.var.group not in TOKEN_GROUPS and not (self.twin and dst in self.latent):
-                    continue
+                if dnode.var.group not in TOKEN_GROUPS:
+                    continue          # state tokens are sources only (D-TB-21)
                 P = {v: self.effect(src, v, dst) for v in vals}
                 mc = self._pair_mc(src, vals, dst)
                 same_op = (self.token_op(src) is not None and self.token_op(src) == self.token_op(dst))
@@ -546,9 +574,11 @@ def _pair_in_support(ta, tb, pairs):
     return (min(a, b), max(a, b)) in pairs
 
 
-def build_alphabet(inst, twin=False):
+def build_alphabet(inst, twin=False, exposed=None, variant=None):
     """Token universe: every (op, outcome) an op can emit under its repertoire
-    masks; on the twin, every (latent variable, value) as well."""
+    masks, plus every (latent variable, value) of the variant's exposed groups
+    (all of them on the twin, none on the latent instance)."""
+    variant, exposed = resolve_exposure(variant, twin, exposed)
     cfg, topo, sset = inst.cfg, inst.topo, inst.sset
     tokens = []
     bff_masks = defaultdict(set)
@@ -568,13 +598,17 @@ def build_alphabet(inst, twin=False):
         for o in outs:
             tokens.append({"token": token_key(op.id, o), "op_id": op.id, "service": svc, "name": op.name,
                            "kind": op.kind, "outcome": o})
-    if twin:
-        for nid in inst.mechanism.latent_ids():
-            var = inst.mechanism.nodes[nid].var
-            for v in var.values:
-                tokens.append({"token": state_token_key(nid, v), "op_id": None, "service": None,
-                               "name": nid, "kind": -1, "outcome": v, "state_var": nid, "group": var.group})
-    return {"description": "trace-bench token alphabet: (operation, outcome) event types" + (" plus (state variable, value) tokens of the observable twin" if twin else ""),
+    for nid in inst.mechanism.latent_ids():
+        var = inst.mechanism.nodes[nid].var
+        if var.group not in exposed:
+            continue
+        for v in var.values:
+            tokens.append({"token": state_token_key(nid, v), "op_id": None, "service": var.meta.get("service"),
+                           "endpoint": var.meta.get("op"), "name": nid, "kind": -1, "outcome": v,
+                           "state_var": nid, "group": var.group, "family": METRIC_FAMILIES.get(var.group)})
+    return {"description": "trace-bench token alphabet: (operation, outcome) event types"
+                           + (f" plus (state variable, value) tokens of the exposed latent groups {sorted(exposed)} ({variant} variant)" if exposed else ""),
+            "variant": variant, "exposed_groups": sorted(exposed), "hidden_groups": sorted(set(LATENT_GROUPS) - exposed),
             "n_tokens": len(tokens), "tokens": tokens}
 
 
@@ -585,18 +619,21 @@ def _mc_merge(*recs):
     return {"n": max(r["n"] for r in used), "se": max(r["se"] for r in used)}
 
 
-def build_targets(inst, twin=False, cap=PROJECTION_CAP_PARTICLES, mc_n=PROJECTION_MC_N):
+def build_targets(inst, twin=False, cap=PROJECTION_CAP_PARTICLES, mc_n=PROJECTION_MC_N, exposed=None, variant=None):
     """Returns (request_target, session_target, {"request": projector, "session": projector})
     as JSON-ready dicts. Directed edges are projected per grain; the bidirected
-    groups once (they are grain-independent)."""
+    groups once (they are grain-independent). `variant` names an exposure
+    profile (`twin=True` is the pre-0.4.0 spelling of the twin profile)."""
+    variant, exposed = resolve_exposure(variant, twin, exposed)
+    hidden = sorted(set(LATENT_GROUPS) - exposed)
     mech = inst.mechanism
-    projs = {g: Projector(mech, grain=g, twin=twin, cap=cap, mc_n=mc_n) for g in GRAINS}
+    projs = {g: Projector(mech, grain=g, exposed=exposed, cap=cap, mc_n=mc_n) for g in GRAINS}
     directed, within, dir_stats = {}, {}, {}
     for g, proj in projs.items():
         directed[g], within[g] = proj.directed_token_edges()
         dir_stats[g] = proj.stats()
         proj.reset_stats()
-    groups = projs["request"].bidirected_groups() if not twin else []
+    groups = projs["request"].bidirected_groups()       # [] when nothing is hidden (the twin)
     group_stats = projs["request"].stats()
     req_pairs, jour_pairs = co_occurrence_support(inst)
 
@@ -638,7 +675,8 @@ def build_targets(inst, twin=False, cap=PROJECTION_CAP_PARTICLES, mc_n=PROJECTIO
         ds, gs = dir_stats[grain], group_stats
         return {
             "description": f"trace-bench scoring target ({grain} grain): latent projection of the mechanism over (operation, outcome) tokens, projected first and floored second; every edge stored with its strength; an edge whose strength rests on a Monte-Carlo estimate above the projection's particle cap carries `mc` (D-TB-19)",
-            "grain": grain, "variant": "twin" if twin else "latent", "default_floor": floor,
+            "grain": grain, "variant": variant, "exposed_groups": sorted(exposed), "hidden_groups": hidden,
+            "default_floor": floor,
             "n_directed": len(d_edges), "n_bidirected": len(b_edges),
             "n_directed_at_floor": sum(1 for e in d_edges if e["strength"] >= floor),
             "n_bidirected_at_floor": sum(1 for e in b_edges if e["strength"] >= floor),

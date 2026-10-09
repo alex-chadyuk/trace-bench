@@ -7,6 +7,7 @@ import random
 import pytest
 
 from tracebench.allowlist import NotMethodReadable, is_method_readable, method_readable_files, open_for_method
+from tracebench.constants import VARIANTS
 from tracebench.graphs import write_graph_artifacts
 from tracebench.instantiate import write_instantiation
 from tracebench.record import read_json
@@ -19,7 +20,7 @@ from xs_fixture import xs_instantiation
 def corpora(tmp_path_factory):
     inst = xs_instantiation()
     out = {}
-    for variant in ("latent", "twin"):
+    for variant in VARIANTS:
         d = tmp_path_factory.mktemp(variant)
         write_instantiation(inst, d, "2026-09-10")
         write_graph_artifacts(inst, d, variant)
@@ -45,6 +46,19 @@ def test_causal_validity_on_twin_and_not_applicable_on_latent(corpora):
     cv = twin["causal_validity"]["value"]
     assert cv is not None and cv["sid"] == 0.0 and cv["parent_aid"] == 0.0 and cv["ancestor_aid"] == 0.0
     assert twin["universe"]["truth_bidirected"] == 0
+
+
+def test_causal_validity_not_applicable_on_the_metrics_variant_with_hidden_groups_named(corpora):
+    res = self_check(corpora["metrics"])
+    assert res["self_check_passed"], res["self_check_problems"]
+    assert res["universe"]["predictions_outside_universe"] == 0
+    cv = res["causal_validity"]
+    assert cv["value"] is None and all(g in cv["reason"] for g in ("auth", "cache", "net"))
+    assert res["variant"] == "metrics" and res["hidden_groups"] == ["auth", "cache", "net"]
+    assert res["universe"]["truth_bidirected"] > 0
+    # a pre-0.4.0 target (no `hidden_groups` key) is gated by its variant name
+    from tracebench.score import causal_validity
+    assert causal_validity({"directed": [], "bidirected": [], "default_floor": 0.05}, {"directed": [], "bidirected": []}, 0.05, "latent")["value"] is None
 
 
 def test_degraded_prediction_is_scored_and_ranked(corpora):
@@ -78,6 +92,9 @@ def test_allowlist_hides_labels_graphs_and_oracle(corpora, tmp_path):
         with pytest.raises(NotMethodReadable):
             open_for_method(d, forbidden)
     assert is_method_readable("views/end-request/sequences/split=train/date=2026-01-05/part-0000.parquet")
+    # the metrics channel is readable; the oracle's tick-resolution state is not (D-TB-21)
+    assert is_method_readable("metrics/series.json") and is_method_readable("metrics/shard=0000/samples.parquet")
+    assert not is_method_readable("oracle/state/shard=0000/changes.parquet") and not is_method_readable("oracle/state/sampling.json")
     assert not is_method_readable("graphs/alphabet.json")
 
 
