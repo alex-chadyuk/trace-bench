@@ -621,6 +621,15 @@ the specification; this file records the implementation's departures from it.
 - **Local corpora belong outside synced folders**: a 26 GB rung × 5 seeds ×
   2 variants is not something to put under Dropbox; pass `--out` accordingly.
 
+- **Score-side scorers for the root-cause arms (2026-10-09; `docs/scorers-service-rca.md`).**
+  `tracebench.score_service` scores a prediction over services against `graphs/views/service.json`
+  through `score_at_floor` with an explicit universe of every ordered pair of deployed services
+  (clients excluded) and ships the deployment topology coarsened to services as its reference;
+  `tracebench.score_rca` scores one component ranking per fault case against `labels/cases.json`
+  (AC@1 / 3 / 5, Avg@5, a seeded percentile bootstrap over cases, the analytic random-ranking
+  expectation, per-fault-kind rows, pooling across corpora). Both are additive: no corpus, target
+  or `tracebench.score` line changes (`tests/test_score_service.py`, `tests/test_score_rca.py`).
+
 ## Constants provenance
 
 - **`constants/realism-v1.json`** (2026-09-10): 63 leaves fitted by the private
