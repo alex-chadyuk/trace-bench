@@ -630,6 +630,31 @@ the specification; this file records the implementation's departures from it.
   expectation, per-fault-kind rows, pooling across corpora). Both are additive: no corpus, target
   or `tracebench.score` line changes (`tests/test_score_service.py`, `tests/test_score_rca.py`).
 
+- **Root-cause export (2026-10-14; `tracebench.export_rca`, score side).** One corpus's injected
+  faults in the standard root-cause suite's case shape: per fault a directory `case-<k>/` (named by
+  position in injection order, never by the labelled case id, which carries the root-cause service
+  and the fault kind) holding `data.csv` — `time` in UNIX seconds plus four log-derived series per
+  deployed service, `<service>_count`, `<service>_error` (the 5xx share), `<service>_latency-50`,
+  `<service>_latency-95`, from the raw feed's `vl.access` lines with `/healthz` dropped, pooled over
+  the corpus before binning because per-pod clock skew moves lines across shard boundaries, from
+  the previous fault's end (or the corpus start) to the labelled fault end; `window.json` with
+  exactly `inject_time` and `end_time`; and `services.json`, the deployed-service universe (the
+  client excluded). The bin width is the rule registered for the dataset paper (its plan question 9,
+  decided 2026-10-14, N = 10): the smallest grid width in {5, 10, 15, 30, 60, 90, 180, 300} s at
+  which, on every seed, the sparsest candidate service's pre-fault median request count per bin
+  reaches 10 and its 10th percentile reaches 1, with at least five bins inside the shortest fault —
+  xs 30 s, s 15 s, m 60 s, a module constant selected by `--rung`, never a knob; every width divides
+  the 900 s shard and every shipped fault boundary of those rungs (`tests/test_export_rca.py`). An
+  empty bin has count 0, error 0 and empty latency cells (nothing is imputed; the consumer applies
+  its own loader's rule); quantiles are written at six decimals and the share at nine, so the file
+  is a pure function of the corpus on every platform (the 2026-10-14 traffic analysis, which binned
+  `request_time` in float32, agrees with it within 1.3e-6 on xs seed 0; counts exactly). The run
+  record hashes every input read — configuration, instantiation, `labels/cases.json`, every
+  access-log shard — and names the two label fields read, which is the evidence that the exporter
+  read the fault window and nothing else; the status-0 lines (the network-error outcome, 6.6 % of
+  the xs seed-0 access lines) are counted and are not part of the 5xx share. Additive: no corpus,
+  target or scorer line changes.
+
 ## Constants provenance
 
 - **`constants/realism-v1.json`** (2026-09-10): 63 leaves fitted by the private
@@ -682,6 +707,14 @@ the specification; this file records the implementation's departures from it.
 - M5 streaming (2026-09-10): the per-shard correlator reproduces the
   whole-corpus report on xs field for field (parent-link P/R/F1, attribution
   histograms, session recovery, orphans, normaliser counts).
+- Root-cause export (2026-10-14, `tests/test_export_rca.py`): the case shape and the two-field
+  window contract on the xs fixture corpus; no case id, fault kind or label key in any exported
+  file and the same four columns for every deployed service; the record hashes every input and
+  names the label fields read; an independent per-line recount of one case's series (counts and
+  shares exact, quantiles within 1e-6); every registered width divides the shard and every shipped
+  fault boundary of xs, s and m with at least five fault bins; the refusals (wrong or unregistered
+  rung, an export directory in use); two parse workers write the same bytes as one. On the
+  released xs seed-0 corpus the 30 s series equal the 2026-10-14 traffic analysis cell for cell.
 
 ## Run registry
 
