@@ -111,6 +111,7 @@ what each degree of observability costs a method.
 
 Generator (MIT): https://github.com/alex-chadyuk/trace-bench — tool version {tool_version}.
 Corpus licence: CC BY 4.0. Fitted realism constants: {constants}.
+Machine-readable metadata: `croissant.json` at the repository root (Croissant 1.0; every file class as a file set, the tabular files as record sets; validated with `mlcroissant`).
 
 | instance | variant | seed | exposed / hidden latent groups | alphabet (realized, train) | mechanism nodes | directed / bidirected at floor | edges on a Monte-Carlo estimate (max SE) |
 |---|---|---|---|---|---|---|---|
