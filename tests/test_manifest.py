@@ -260,6 +260,9 @@ def test_release_verifies_the_host_then_tags_it(tmp_path):
     card = api.remote["README.md"][2].decode()
     assert "viewer: false" in card and "cc-by-4.0" in card and "| xs | latent | 0 | none / " in card
     assert "`metrics`" in card
+    lines = card.splitlines()
+    pointer = "Machine-readable metadata: `croissant.json` at the repository root"
+    assert lines[next(i for i, l in enumerate(lines) if l.startswith("Corpus licence:")) + 1].startswith(pointer)
     index = api.remote["release.json"][2].decode()
     assert '"version": "v0.2.0"' in index and '"path": "instances/xs/latent/seed=0"' in index
     assert '"derived_from": null' in index
