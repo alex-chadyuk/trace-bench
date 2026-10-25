@@ -654,6 +654,20 @@ the specification; this file records the implementation's departures from it.
   read the fault window and nothing else; the status-0 lines (the network-error outcome, 6.6 % of
   the xs seed-0 access lines) are counted and are not part of the 5xx share. Additive: no corpus,
   target or scorer line changes.
+  - **Extras (2026-10-26; `--extras topology spans`, for the dataset paper's stretch root-cause
+    arms).** Two optional files per case beside the three above, which they leave byte-identical
+    (`tests/test_export_rca.py`): `topology.json` — the deployment call topology coarsened to the
+    deployed services, caller → callee as stored in `instantiation.json` (`topology.edges` mapped to
+    services through `topology.ops`; the client excluded, within-service calls dropped, the largest
+    `p_call` per ordered pair; the same pairs as `score_service --prediction topology`, in the stored
+    direction), the same content in every case directory, for a method that declares a
+    topology-informed input; and `spans.csv` — one row per span (`trace_id, service, operation,
+    start_us, duration_us, parent_pos`, microseconds) of every request trace of the correlated
+    end-ordered request view whose last span ends inside the case's window `[window start,
+    end_time)`, every split read, service and operation from the view's `model-vocab.json` base ops
+    (a token outside them is refused), for a trace-reading method; the reconstruction's measured loss
+    is part of that input. The record hashes the view files and the vocabulary it read, counts the
+    traces read, placed and outside every case, and lists the extras asked for. Nothing else changes.
 
 ## Constants provenance
 
@@ -713,7 +727,11 @@ the specification; this file records the implementation's departures from it.
   names the label fields read; an independent per-line recount of one case's series (counts and
   shares exact, quantiles within 1e-6); every registered width divides the shard and every shipped
   fault boundary of xs, s and m with at least five fault bins; the refusals (wrong or unregistered
-  rung, an export directory in use); two parse workers write the same bytes as one. On the
+  rung, an export directory in use); two parse workers write the same bytes as one. Extras
+  (2026-10-26): the three registered files are byte-identical with and without extras; `topology.json`
+  equals the scorer's topology reference with the direction stored; `spans.csv` equals an independent
+  recount of the view's traces ending in each case window; unknown or repeated extras are refused
+  before anything is written; the CLI accepts them. On the
   released xs seed-0 corpus the 30 s series equal the 2026-10-14 traffic analysis cell for cell.
 
 ## Run registry
