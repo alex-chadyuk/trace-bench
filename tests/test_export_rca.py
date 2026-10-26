@@ -166,3 +166,95 @@ def test_cli_writes_the_record(exported, tmp_path):
     meta = read_json(out / "run" / "run_meta.json")
     assert meta["command"] == "export_rca" and meta["status"] == "ok"
     assert (out / "case-00" / "data.csv").read_bytes() == (exported[1] / "case-00" / "data.csv").read_bytes()
+
+
+# --- extras (2026-10-26): topology.json and spans.csv beside the three registered files ---------------
+
+@pytest.fixture(scope="module")
+def exported_extras(tmp_path_factory):
+    from tracebench.export_rca import EXTRAS
+    corpus = xs_corpus()
+    out = tmp_path_factory.mktemp("rca-export-extras") / "xs-s0"
+    results = export(corpus, "xs", out, workers=1, extras=EXTRAS)
+    return corpus, out, results
+
+
+def test_extras_change_nothing_in_the_three_registered_files(exported, exported_extras):
+    from tracebench.export_rca import SPANS_CSV, TOPOLOGY_JSON
+    from tracebench.record import sha256_file
+    _, base, res0 = exported
+    _, out, res = exported_extras
+    for d in ("case-00", "case-01"):
+        for f in ("data.csv", "window.json", "services.json"):
+            assert sha256_file(out / d / f) == sha256_file(base / d / f), (d, f)
+        assert sorted(p.name for p in (out / d).iterdir()) == sorted(["data.csv", "window.json", "services.json", TOPOLOGY_JSON, SPANS_CSV])
+        assert sorted(p.name for p in (base / d).iterdir()) == ["data.csv", "services.json", "window.json"]
+    assert res0["extras"] == [] and res["extras"] == ["topology", "spans"]
+    for c0, c in zip(res0["cases"], res["cases"]):
+        assert {k: v for k, v in c0["sha256"].items()} == {k: v for k, v in c["sha256"].items() if k in c0["sha256"]}
+
+
+def test_topology_json_is_the_service_coarsening_in_the_stored_direction(exported_extras):
+    from tracebench.export_rca import TOPOLOGY_JSON
+    from tracebench.score_service import deployed_services, service_key, topology_reference
+    corpus, out, res = exported_extras
+    docs = [read_json(out / d / TOPOLOGY_JSON) for d in ("case-00", "case-01")]
+    assert docs[0] == docs[1]  # the same content in every case directory
+    edges = docs[0]["edges"]
+    names = {service_key(i): n for i, n, _ in deployed_services(corpus)}
+    ref = topology_reference(corpus)["directed"]  # callee -> caller, the scorer's flip
+    assert sorted((e["caller"], e["callee"], e["p_call"]) for e in edges) == sorted((names[r["dst"]], names[r["src"]], r["score"]) for r in ref)
+    assert all(e["caller"] != e["callee"] for e in edges) and "client" not in {e["caller"] for e in edges} | {e["callee"] for e in edges}
+    assert res["topology"]["n_edges"] == len(edges) == len(ref)
+
+
+def test_spans_csv_is_the_views_traces_ending_in_the_case_window(exported_extras):
+    import glob
+
+    import pyarrow.parquet as pq
+
+    from tracebench.export_rca import NS_PER_S, NS_PER_US, SPANS_COLUMNS, SPANS_CSV
+    corpus, out, res = exported_extras
+    epoch, _ = window_epoch(yaml.safe_load((corpus / "config.yaml").read_text()))
+    vocab = read_json(corpus / "views" / "end-request" / "model-vocab.json")
+    ops = {int(o["id"]): (o["service"], o["name"]) for o in vocab["base_ops"]}
+    files = sorted(glob.glob(str(corpus / "views" / "end-request" / "sequences" / "split=*" / "date=*" / "*.parquet")))
+    rows = [r for f in files for r in pq.read_table(f).to_pylist()]
+    assert res["spans"]["n_traces_read"] == len(rows) and res["spans"]["view"] == "end-request"
+    assert {p.relative_to(corpus).as_posix() for p in map(lambda f: __import__("pathlib").Path(f), files)} <= {i["path"] for i in res["inputs"]}
+    assert "views/end-request/model-vocab.json" in {i["path"] for i in res["inputs"]}
+    total_in = 0
+    for c in res["cases"]:
+        lo, hi = c["window_start"] * NS_PER_S, c["end_time"] * NS_PER_S
+        expected = []
+        for r in rows:
+            end = r["start_ns"] + max(o + d for o, d in zip(r["offsets"], r["durations"]))
+            if lo <= end < hi:
+                for op, o, d, pp in zip(r["ops"], r["offsets"], r["durations"], r["parent_pos"]):
+                    expected.append([r["trace_id"], ops[op][0], ops[op][1], str((r["start_ns"] + o) // NS_PER_US), str(d // NS_PER_US), str(pp)])
+        header, got = _read_csv(out / c["dir"] / SPANS_CSV)
+        assert header == list(SPANS_COLUMNS)
+        assert got == expected and c["n_spans"] == len(expected) and len(expected) > 0
+        total_in += len({e[0] for e in expected})
+    assert sum(res["spans"]["n_traces_per_case"]) == total_in
+    assert res["spans"]["n_traces_outside_cases"] == len(rows) - total_in
+    # the record names only the view files when spans were asked for
+    assert res["inputs"][3]["path"].startswith("raw/")
+
+
+def test_unknown_or_repeated_extras_are_refused(tmp_path):
+    corpus = xs_corpus()
+    with pytest.raises(ValueError):
+        export(corpus, "xs", tmp_path / "a", workers=1, extras=("spans", "spans"))
+    with pytest.raises(ValueError):
+        export(corpus, "xs", tmp_path / "b", workers=1, extras=("labels",))
+    assert not any((tmp_path / "a").glob("case-*")) and not any((tmp_path / "b").glob("case-*"))
+
+
+def test_cli_accepts_extras(exported, tmp_path):
+    from tracebench.export_rca import SPANS_CSV, TOPOLOGY_JSON
+    corpus, _, _ = exported
+    out = tmp_path / "cli"
+    assert main(["--corpus", str(corpus), "--rung", "xs", "--out", str(out), "--extras", "topology", "spans"]) == 0
+    assert (out / "case-00" / TOPOLOGY_JSON).exists() and (out / "case-00" / SPANS_CSV).exists()
+    assert read_json(out / "run" / "results.json")["extras"] == ["topology", "spans"]

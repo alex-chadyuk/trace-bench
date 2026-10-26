@@ -29,6 +29,21 @@ reaches N and its 10th percentile reaches 1, with at least five bins inside the 
 — xs 30 s, s 15 s, m 60 s. It is a constant of this module, selected by `--rung`, never a
 command-line knob; a rung without a registered width is refused.
 
+Two optional extras (`--extras topology spans`, 2026-10-26; the stretch arms' inputs) add a file per
+case beside the three above and change nothing in them:
+
+- `topology.json` — the deployment call topology coarsened to deployed services, caller → callee
+  as stored in `instantiation.json` (`topology.edges`, op-level, mapped to services through
+  `topology.ops`; the client excluded; within-service calls dropped; one edge per ordered pair
+  with the largest `p_call`). The same content in every case directory. A method that declares
+  it reads a topology-informed input.
+- `spans.csv` — one row per span of every request trace of the correlated end-ordered request
+  view (`views/end-request/sequences/**`) whose last span ends inside the case's window
+  `[window start, end_time)`: `trace_id, service, operation, start_us, duration_us, parent_pos`
+  (microseconds; the view's `start_ns + offsets[i]` and `durations[i]`; service and operation
+  from the view's `model-vocab.json` base ops). Every split's rows are read: the root-cause
+  read is not a test-split read. The reconstruction's measured loss is part of this input.
+
 The run record (`<out>/run/`) lists every input file read with its sha256 — the configuration,
 the instantiation, `labels/cases.json` and every access-log shard — and names the two label
 fields read, which is the evidence that the exporter read the fault window and nothing else.
@@ -36,6 +51,7 @@ fields read, which is the evidence that the exporter read the fault window and n
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import datetime as dt
 import gzip
@@ -47,7 +63,7 @@ import numpy as np
 import yaml
 
 from .constants import (CASES_JSON, CONFIG_YAML, INSTANTIATION_JSON, KIND_ACCESS, KIND_CLIENT, KIND_NAMES,
-                        LABELS_DIR, RAW_DIR)
+                        LABELS_DIR, RAW_DIR, SEQUENCES_DIR, VIEWS_DIR)
 from .log import log
 from .record import RunRecord, read_json, sha256_file, write_json
 
@@ -80,6 +96,18 @@ MIN_POST_BINS = 5  # the rule's fault-resolution bound
 LATENCY_DECIMALS = 6  # quantiles of a millisecond-valued request_time, written at microsecond resolution
 SHARE_DECIMALS = 9  # the 5xx share, rounded like every stored Monte-Carlo quantity (constants.MC_DECIMALS)
 HEALTHZ = "/healthz"
+# --- extras (2026-10-26): the stretch arms' inputs, beside the three case files ---------------
+EXTRA_TOPOLOGY = "topology"
+EXTRA_SPANS = "spans"
+EXTRAS = (EXTRA_TOPOLOGY, EXTRA_SPANS)
+TOPOLOGY_JSON = "topology.json"
+SPANS_CSV = "spans.csv"
+SPANS_COLUMNS = ("trace_id", "service", "operation", "start_us", "duration_us", "parent_pos")
+SPANS_VIEW = "end-request"  # the correlated request view in end ordering (the arms' latent view)
+MODEL_VOCAB_JSON = "model-vocab.json"
+NS_PER_S = 1_000_000_000
+NS_PER_US = 1_000
+SPANS_BATCH_ROWS = 20_000
 ACCESS_TAG = f'"kind":"{KIND_ACCESS}"'  # the raw JSON is compact with sorted keys
 
 
@@ -216,8 +244,82 @@ def write_case(case_dir, names, kinds, epoch_unix, width, lo, hi, count, n5xx, p
     return n_empty
 
 
-def export(corpus_dir, rung, out_dir, workers=1):
+def topology_edges(inst):
+    """`[{"caller", "callee", "p_call"}]` — the deployment call topology coarsened to deployed services,
+    caller → callee as stored (not pre-flipped), the client excluded, within-service calls dropped, the
+    largest `p_call` per ordered pair. The service pairs are `score_service.topology_reference`'s, in the
+    stored direction."""
+    topo = inst["topology"]
+    names = {int(s["index"]): str(s["name"]) for s in topo["services"] if int(s["kind"]) != KIND_CLIENT}
+    svc_of = {int(o["id"]): int(o["service"]) for o in topo["ops"]}
+    best = {}
+    for e in topo["edges"]:
+        a, b = svc_of[int(e["caller"])], svc_of[int(e["callee"])]
+        if a == b or a not in names or b not in names:
+            continue
+        key = (names[a], names[b])
+        best[key] = max(best.get(key, 0.0), float(e.get("p_call", 1.0)))
+    return [{"caller": a, "callee": b, "p_call": p} for (a, b), p in sorted(best.items())]
+
+
+def view_inputs(corpus_dir, view=SPANS_VIEW):
+    """The view's vocabulary file and its sequence parquet files, sorted."""
+    root = Path(corpus_dir) / VIEWS_DIR / view
+    files = sorted(root.glob(f"{SEQUENCES_DIR}/split=*/date=*/*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"no sequence files under {root / SEQUENCES_DIR}")
+    return root / MODEL_VOCAB_JSON, files
+
+
+def base_ops(vocab):
+    """op id → (service, operation name) from the view's `model-vocab.json`."""
+    return {int(o["id"]): (str(o["service"]), str(o["name"])) for o in vocab["base_ops"]}
+
+
+def view_spans(files, ops, windows_ns):
+    """Per case window (sorted, non-overlapping `[lo_ns, hi_ns)` on the trace's last span end), the span rows
+    of every request trace of the view whose last span ends inside it; returns `(rows per case, counts)`."""
+    import pyarrow.parquet as pq
+
+    los = [lo for lo, _ in windows_ns]
+    rows = [[] for _ in windows_ns]
+    n_traces = [0] * len(windows_ns)
+    n_read = n_outside = 0
+    cols = ["trace_id", "ops", "offsets", "durations", "parent_pos", "start_ns"]
+    for f in files:
+        for batch in pq.ParquetFile(f).iter_batches(batch_size=SPANS_BATCH_ROWS, columns=cols):
+            for r in batch.to_pylist():
+                n_read += 1
+                start, offs, durs = int(r["start_ns"]), r["offsets"], r["durations"]
+                end = start + max(o + d for o, d in zip(offs, durs))
+                k = bisect.bisect_right(los, end) - 1
+                if k < 0 or end >= windows_ns[k][1]:
+                    n_outside += 1
+                    continue
+                n_traces[k] += 1
+                for i, (op, o, d, pp) in enumerate(zip(r["ops"], offs, durs, r["parent_pos"])):
+                    if int(op) not in ops:
+                        raise ValueError(f"trace {r['trace_id']} position {i}: token {op} is not a base op of the view's vocabulary")
+                    svc, name = ops[int(op)]
+                    rows[k].append((r["trace_id"], svc, name, (start + int(o)) // NS_PER_US, int(d) // NS_PER_US, int(pp)))
+    return rows, {"n_traces_read": n_read, "n_traces_outside_cases": n_outside, "n_traces_per_case": n_traces}
+
+
+def write_spans(case_dir, rows):
+    with open(Path(case_dir) / SPANS_CSV, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(SPANS_COLUMNS)
+        w.writerows(rows)
+    return len(rows)
+
+
+
+def export(corpus_dir, rung, out_dir, workers=1, extras=()):
     corpus_dir, out_dir = Path(corpus_dir), Path(out_dir)
+    extras = tuple(extras)
+    unknown_extras = [x for x in extras if x not in EXTRAS]
+    if unknown_extras or len(set(extras)) != len(extras):
+        raise ValueError(f"unknown or repeated extras {extras}; registered: {EXTRAS}")
     if rung not in BIN_WIDTH_S:
         raise ValueError(f"no registered bin width for rung {rung!r}; registered: {sorted(BIN_WIDTH_S)}")
     width = BIN_WIDTH_S[rung]
@@ -274,8 +376,29 @@ def export(corpus_dir, rung, out_dir, workers=1):
         case_records.append({"dir": c["dir"], "window_start": epoch_unix + int(c["window_start_s"]), **window,
                              "n_bins_pre": inj - lo, "n_bins_post": hi - inj, "n_rows": hi - lo, "n_empty_cells": n_empty,
                              "sha256": {f: sha256_file(case_dir / f) for f in (DATA_CSV, WINDOW_JSON, SERVICES_JSON)}})
+    extra_inputs, extra_results = [], {}
+    if EXTRA_TOPOLOGY in extras:
+        edges = topology_edges(inst)
+        topology_doc = {"edges": edges, "source": f"{INSTANTIATION_JSON}: topology.edges coarsened to the deployed services, "
+                        "caller -> callee as stored, the client excluded, within-service calls dropped, largest p_call per pair"}
+        for c, rec in zip(plan, case_records):
+            write_json(out_dir / c["dir"] / TOPOLOGY_JSON, topology_doc)
+            rec["sha256"][TOPOLOGY_JSON] = sha256_file(out_dir / c["dir"] / TOPOLOGY_JSON)
+        extra_results[EXTRA_TOPOLOGY] = {"n_edges": len(edges), "fields_read": ["topology.services", "topology.ops", "topology.edges"]}
+    if EXTRA_SPANS in extras:
+        vocab_path, view_files = view_inputs(corpus_dir)
+        ops = base_ops(read_json(vocab_path))
+        windows_ns = [((epoch_unix + int(c["window_start_s"])) * NS_PER_S, (epoch_unix + int(c["end_time_s"])) * NS_PER_S) for c in plan]
+        span_rows, counts = view_spans(view_files, ops, windows_ns)
+        for c, rec, rows in zip(plan, case_records, span_rows):
+            rec["n_spans"] = write_spans(out_dir / c["dir"], rows)
+            rec["sha256"][SPANS_CSV] = sha256_file(out_dir / c["dir"] / SPANS_CSV)
+        extra_inputs = [vocab_path, *view_files]
+        extra_results[EXTRA_SPANS] = {"view": SPANS_VIEW, "n_files": len(view_files), "columns": list(SPANS_COLUMNS),
+                                      "unit": "microseconds", "selection": "request traces whose last span ends in [window start, end_time)",
+                                      "splits_read": "all", **counts}
     inputs = [{"path": p.relative_to(corpus_dir).as_posix(), "bytes": p.stat().st_size, "sha256": sha256_file(p)}
-              for p in [cfg_path, inst_path, cases_path, *shards]]
+              for p in [cfg_path, inst_path, cases_path, *shards, *extra_inputs]]
     results = {
         "rung": rung, "width_s": width, "rule": RULE, "corpus_dir_name": corpus_dir.name, "instance": inst.get("instance"),
         "config_hash": inst.get("config_hash"), "corpus_tool_version": inst.get("tool_version"),
@@ -287,6 +410,7 @@ def export(corpus_dir, rung, out_dir, workers=1):
         "n_healthz_dropped": sum(p["n_healthz"] for p in parts), "n_rows_binned": int(len(t)) - n_outside,
         "n_rows_outside_window": n_outside, "n_status_0": int((status == 0).sum()),
         "n_5xx": int(((status >= 500) & (status < 600)).sum()), "cases": case_records,
+        "extras": list(extras), **extra_results,
     }
     log({"event": "export_rca_done", "rung": rung, "n_cases": len(case_records), "n_rows_binned": results["n_rows_binned"],
          "n_rows_outside_window": n_outside})
@@ -300,13 +424,16 @@ def build_parser():
                    help="selects the registered bin width (xs 30 s, s 15 s, m 60 s); must match the corpus instance")
     p.add_argument("--out", required=True, help="the export root; one case-<k>/ per fault plus run/")
     p.add_argument("--workers", type=int, default=1, help="shard parsers run in parallel (rows are pooled before binning)")
+    p.add_argument("--extras", nargs="*", default=(), choices=EXTRAS,
+                   help="optional case files beside the three: topology.json (deployed-service call edges) and/or spans.csv "
+                        "(the end-ordered request view's spans per case); the three registered files are unchanged")
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     rec = RunRecord(args.out, "export_rca", vars(args))
-    results = export(args.corpus, args.rung, args.out, workers=args.workers)
+    results = export(args.corpus, args.rung, args.out, workers=args.workers, extras=tuple(args.extras))
     rec.finish(results)
     return 0
 
