@@ -474,3 +474,18 @@ def test_cli_round_trip_including_ranking_trace_and_pool(hand_corpus, tmp_path):
     with pytest.raises(SystemExit):
         main(["--bootstrap-b", "1", "--bootstrap-seed", "1", "--out", str(tmp_path / "x.json")])
     assert tuple(MODES) == ("arm", "topology", "random", "callees", "broadcast") and set(NONOK_IDS) == {OUTCOME_5XX, OUTCOME_ERR, OUTCOME_SLOW}
+
+
+
+def test_preloaded_inputs_give_the_same_result_and_refuse_another_selection(hand_corpus):
+    """`load_inputs` + `score(..., inputs=…)` equals a bare `score` call (the harness scores every row of a cell from one
+    load); inputs of another selection are refused."""
+    from tracebench.score_rca_trace import load_inputs
+
+    inputs = load_inputs(hand_corpus, CELL)
+    a = score(hand_corpus, CELL, None, "topology", 0, 50, 0)
+    b_ = score(hand_corpus, CELL, None, "topology", 0, 50, 0, inputs=inputs)
+    assert a == b_
+    assert score(hand_corpus, CELL, None, "random", 0, 50, 0, inputs=inputs) == score(hand_corpus, CELL, None, "random", 0, 50, 0)
+    with pytest.raises(ValueError):
+        score(hand_corpus, {**CELL, "cap": 7}, None, "topology", 0, 50, 0, inputs=inputs)

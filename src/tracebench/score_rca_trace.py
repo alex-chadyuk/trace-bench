@@ -545,7 +545,21 @@ def _check_prediction(mode, prediction, services_order):
         raise ValueError(f"mode {mode} takes no prediction")
 
 
-def score(corpus_dir, cell, prediction, mode, hop0, b, seed):
+def load_inputs(corpus_dir, cell):
+    """Everything `score` reads from the corpus for one cell — the labels, the ops, the services order, the case windows
+    and the selected rows — loaded once so a caller scoring several rows of one cell (the harness's `scoretrace`:
+    the arm's two readings, the floor, the controls and the broadcast rows) pays the view and label reads once.
+    `score(..., inputs=load_inputs(corpus_dir, cell))` is identical to `score(...)` without it."""
+    corpus_dir = Path(corpus_dir)
+    select, cap = str(cell["select"]), int(cell["cap"])
+    ops, client_ops = load_ops(corpus_dir)
+    windows = case_windows_ns(corpus_dir)
+    return {"corpus_dir": corpus_dir, "select": select, "cap": cap, "labels": load_labels(corpus_dir), "ops": ops,
+            "client_ops": client_ops, "services_order": services_sorted(corpus_dir), "windows": windows,
+            "selected": select_traces(corpus_dir, windows, client_ops, select, cap)}
+
+
+def score(corpus_dir, cell, prediction, mode, hop0, b, seed, inputs=None):
     corpus_dir = Path(corpus_dir)
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; registered: {MODES}")
@@ -553,12 +567,13 @@ def score(corpus_dir, cell, prediction, mode, hop0, b, seed):
     if hop0 not in (0, 1):
         raise ValueError(f"hop0 must be 0 or 1, got {hop0}")
     select, cap = str(cell["select"]), int(cell["cap"])
-    labels = load_labels(corpus_dir)
-    ops, client_ops = load_ops(corpus_dir)
-    services_order = services_sorted(corpus_dir)
+    if inputs is None:
+        inputs = load_inputs(corpus_dir, cell)
+    elif (inputs["corpus_dir"], inputs["select"], inputs["cap"]) != (corpus_dir, select, cap):
+        raise ValueError("the preloaded inputs are of another corpus or selection")
+    labels, ops, client_ops = inputs["labels"], inputs["ops"], inputs["client_ops"]
+    services_order, windows, selected = inputs["services_order"], inputs["windows"], inputs["selected"]
     _check_prediction(mode, prediction, services_order)
-    windows = case_windows_ns(corpus_dir)
-    selected = select_traces(corpus_dir, windows, client_ops, select, cap)
     case_rows, trace_rows = [], []
     for case_dir, case, _, _ in windows:
         rows = selected[case_dir]
