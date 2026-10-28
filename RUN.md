@@ -669,6 +669,20 @@ the specification; this file records the implementation's departures from it.
     is part of that input. The record hashes the view files and the vocabulary it read, counts the
     traces read, placed and outside every case, and lists the extras asked for. Nothing else changes.
 
+- **Per-trace root-cause scorer (2026-10-31; `tracebench.score_rca_trace`, score side; `docs/scorers-service-rca.md` §4).**
+  The root-cause question per failed request: per fault case every request trace of the end-ordered
+  view wholly inside the fault window with a failed non-client span (5xx / err / slow; the selection rule
+  R, recomputed here from the view and refused on a mismatch with the method side's record), scored on
+  the traces in which the fault took (a `rc_positions_end` position with such an outcome, recomputed from
+  the view — the label's `rc_took` also counts 4xx) by hit@1 / hit@3 of the root-cause service among the
+  trace's services and of any root-cause position among the positions, plus the exact candidate set; a
+  method's per-trace reached lists (`arm`), a case ranking broadcast to the trace (`broadcast`), the rule
+  on the true call tree (`topology`: `parent_pos` descendants of each failed span) and two analytic
+  controls (`random`, `callees`); per case the mean over traces, the point the mean over cases, a seeded
+  percentile bootstrap over cases, `pool` over corpora. The first consumer of
+  `labels/sequence-labels.parquet`. Additive: no corpus, target, exporter or scorer line changes
+  (`tests/test_score_rca_trace.py`).
+
 ## Constants provenance
 
 - **`constants/realism-v1.json`** (2026-09-10): 63 leaves fitted by the private
