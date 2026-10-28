@@ -49,3 +49,53 @@ addenda at the end of this file, never edits in place.
 The two modules are additive. `tracebench.score` is not changed by them; the version a consumer
 pins is the consumer's record (the reference harness pins commit `8e91aa2`, tag `v0.3.0-score2`;
 the paper's root-cause tables name the tag they were scored under).
+
+## 4. `tracebench.score_rca_trace` — the per-trace axis (addendum 2026-10-31, before the first per-trace read)
+
+A third score-side scorer for the dataset paper's root-cause arms (its plan of 2026-10-31, approved
+by the owner the same day): the root-cause question asked per **failed request** rather than per
+fault case. Additive like §1–§2; `tracebench.score`, `score_rca`, `score_service` and `export_rca`
+are not changed by it.
+
+- **Labels.** `labels/sequence-labels.parquet` (`correlate.views.LABELS_SCHEMA`; one row per request
+  trace and injected fault): `phase` (PRE 0 / POST 1 / STRADDLE 2 / NONE −1 against the fault
+  window), `rc_positions_end` (the end-ordered request row's positions whose operation belongs to the
+  fault's service and endpoints), `rc_took` (one of them has any non-OK outcome, 4xx included).
+  Beside them `labels/cases.json` (the root-cause service) and the end-ordered request view's rows
+  (`ops`, `outcomes`, `offsets`, `durations`, `parent_pos`, `start_ns`) and `model-vocab.json`.
+- **Selection (rule R, label-free, recomputed here and refused on a mismatch with the method side's
+  record).** Per case, every request trace of the view, all splits, wholly inside the fault window
+  (`inject · 1e9 ≤ start_ns` and `start_ns + max(offsets + durations) < end · 1e9`, integer ns) with
+  at least one failed non-client span (`outcomes` in {5xx, err, slow}); ordered by `start_ns`, then
+  `trace_id`; cap 0 = all. **Scored set** = the selected traces in which the fault took: a
+  root-cause position with an outcome in {5xx, err, slow}, recomputed from the view row (the label's
+  `rc_took` also counts 4xx; took ⇒ `rc_took` is asserted). A selected trace the method skipped is a
+  miss.
+- **Input.** Mode `arm`: per case and probed trace the method's ranked **reached** services (indices
+  into the name-ordered deployed services) and ranked window positions — the harness's
+  `ranking-trace.json`, whose header carries the cell's context `c`, length cap and the selected and
+  skipped ids. Mode `broadcast`: a case-level ranking in `score_rca`'s shape (or a list of per-run
+  rankings), filtered to the trace's own services with the order kept, absent services appended in
+  name order, an unranked case a miss, a failed run 0. Modes `topology` (the rule on the true call
+  tree: the descendants of every failed non-client span by `parent_pos`, ranked by the number of
+  failed spans whose subtree holds the service, then the smallest hop, then name order), `random`
+  (analytic) and `callees` (analytic, over the failed spans' descendant services) take no input.
+  `hop0` adds a failed span itself at hop 0 (`arm` reads the method's `hop0` lists).
+- **Metrics.** Per trace: hit@1 and hit@3 of the root-cause service among the trace's distinct
+  non-client services; of any root-cause position among the positions (an arm's window position is
+  `i − c + 1`, reachable for `c − 1 ≤ i < min(len(ops), 64)`; unreachable positions are counted and
+  are misses); the **exact set** = 1 iff the method's reached-service set equals {root-cause
+  service}, with its size (trace-reading modes only). Per case the means over its scored traces;
+  **the reported point is the mean over cases** (the ranking axis's unit). Per fault kind; per split
+  (train / val+test) trace-weighted, as the training-overlap audit.
+- **Uncertainty.** A percentile bootstrap over cases of the case-mean rates (`numpy.random
+  .default_rng(seed).integers(0, n, (b, n))`, 95 %), the same draws as §2's; registered values B =
+  2000, seed 0. `pool` concatenates the case rows of several results (the five seeds of a rung, or
+  every rung), so the resampling unit stays the (corpus, case) pair.
+- **Random expectation per trace.** Services: min(k, n_t) / n_t over the trace's n_t distinct
+  non-client services; positions: 1 − C(m − r, k′) / C(m, k′) with k′ = min(k, m), m the candidate
+  positions and r the reachable root-cause positions (0 when r = 0); reported as the mean over cases
+  of the per-case means.
+- **Pins and identity.** The reference harness's root-cause sibling moves its pin to the `clear-2027`
+  commit carrying this module (its D-TBR-14); the three earlier scorers are byte-identical at that
+  commit.
