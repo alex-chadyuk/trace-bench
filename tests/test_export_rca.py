@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from corpus_fixture import xs_corpus
-from tracebench.export_rca import (BIN_WIDTH_S, GRID_WIDTHS_S, LABEL_FIELDS_READ, METRICS, MIN_POST_BINS, MIN_PRE_BINS,
+from tracebench.export_rca import (BIN_WIDTH_S, FLOORED_RUNGS, check_alignment, GRID_WIDTHS_S, LABEL_FIELDS_READ, METRICS, MIN_POST_BINS, MIN_PRE_BINS,
                                    SHARD_S, WINDOW_KEYS, case_dirs, export, main, window_epoch)
 from tracebench.record import read_json
 from xs_fixture import REPO
@@ -130,7 +130,7 @@ def test_series_equal_an_independent_recount(exported):
     assert n_checked > 50
 
 
-@pytest.mark.parametrize("rung", sorted(BIN_WIDTH_S))
+@pytest.mark.parametrize("rung", sorted(r for r in BIN_WIDTH_S if r not in FLOORED_RUNGS))
 def test_registered_width_divides_the_shard_and_every_shipped_fault_boundary(rung):
     width = BIN_WIDTH_S[rung]
     assert width in GRID_WIDTHS_S and SHARD_S % width == 0
@@ -144,12 +144,33 @@ def test_registered_width_divides_the_shard_and_every_shipped_fault_boundary(run
     assert (cfg["run"]["window"]["duration_hours"] * 3600) % width == 0
 
 
+@pytest.mark.parametrize("rung", sorted(FLOORED_RUNGS))
+def test_floored_rung_width_divides_the_shard_and_floors_exactly_the_registered_boundaries(rung):
+    """l (2026-11-08): 180 s divides the shard and the corpus window, keeps >= 5 bins in every fault, and three of the ten
+    fault boundaries sit 60-120 s past a bin edge — floored, and the offsets returned for the record; any other rung with
+    an off-grid boundary is still refused."""
+    width = BIN_WIDTH_S[rung]
+    assert width in GRID_WIDTHS_S and SHARD_S % width == 0
+    cfg = yaml.safe_load((REPO / "configs" / "instances" / f"{rung}.yaml").read_text())
+    faults = cfg["schedules"]["faults"]
+    assert faults and (cfg["run"]["window"]["duration_hours"] * 3600) % width == 0
+    cases = [{"inject_time_s": f["start_s"], "end_time_s": f["end_s"]} for f in faults]
+    offsets = check_alignment(width, cases, rung)
+    off = {(c["inject_time_s"], k): v for c in cases for k, v in offsets[c["inject_time_s"]].items() if v}
+    assert off == {(47520, "end_time_s"): 60, (62220, "inject_time_s"): 120, (76020, "inject_time_s"): 60}
+    for f in faults:
+        assert f["end_s"] // width - f["start_s"] // width >= MIN_POST_BINS
+    with pytest.raises(ValueError, match="grid"):
+        check_alignment(width, cases, "m")
+    assert check_alignment(60, cases, "m") == {c["inject_time_s"]: {"inject_time_s": 0, "end_time_s": 0} for c in cases}
+
+
 def test_refusals(exported, tmp_path):
     corpus, out, _ = exported
     with pytest.raises(ValueError, match="instance"):
         export(corpus, "s", tmp_path / "wrong-rung")
     with pytest.raises(ValueError, match="registered"):
-        export(corpus, "l", tmp_path / "no-width")
+        export(corpus, "xl", tmp_path / "no-width")
     with pytest.raises(FileExistsError):
         export(corpus, "xs", out)  # a replay goes to a new directory
     with pytest.raises(SystemExit):

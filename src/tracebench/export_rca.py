@@ -70,7 +70,13 @@ from .record import RunRecord, read_json, sha256_file, write_json
 # --- the registered bin-width rule (plan Q9, owner decision 2026-10-14) ----------------------
 GRID_WIDTHS_S = (5, 10, 15, 30, 60, 90, 180, 300)
 RULE_N = 10
-BIN_WIDTH_S = {"xs": 30, "s": 15, "m": 60}
+BIN_WIDTH_S = {"xs": 30, "s": 15, "m": 60, "l": 180}
+# l (2026-11-08, the harness's dated addendum; a disclosed departure from the N = 10 rule, which has no solution at l):
+# N = 5 at 180 s (the sparsest service's pre-fault median 5, p10 2), >= 5 bins in the shortest fault (exactly 5), and the
+# three l fault boundaries that are not on the 180 s grid (49 020, 62 220, 76 020 s; 60-120 s off) are FLOORED to the
+# bin containing them, the offsets recorded per case. Every xs / s / m boundary stays on its grid and is still refused otherwise.
+FLOORED_RUNGS = ("l",)
+RELAXED_RULE = {"l": {"N": 5, "boundaries": "floored to the containing bin; offsets recorded per case", "decided": "2026-11-08"}}
 RULE = {
     "statement": ("the smallest grid width at which, on every seed, the sparsest candidate service's pre-fault "
                   "median request count per bin reaches N and its 10th percentile reaches 1, with at least five "
@@ -80,6 +86,7 @@ RULE = {
     "min_bins_in_shortest_fault": 5,
     "widths_s": dict(BIN_WIDTH_S),
     "decided": "2026-10-14",
+    "relaxed": RELAXED_RULE,
 }
 SHARD_S = 900  # every registered width divides the shard clock, so bins never straddle a shard boundary
 
@@ -145,13 +152,21 @@ def case_dirs(cases):
     return [(CASE_DIR_FMT.format(k=k), c) for k, c in enumerate(ordered)]
 
 
-def check_alignment(width, cases):
+def check_alignment(width, cases, rung=None):
+    """Every boundary on the bin grid, or the export refuses — except on a FLOORED rung, where a boundary off the grid is
+    floored to its bin by the `//` of the case plan and the offsets are returned to be recorded (`{case key: {field: s}}`)."""
+    offsets = {}
     for c in cases:
         for key in ("inject_time_s", "end_time_s"):
             v = float(c[key])
-            if v != int(v) or int(v) % width:
+            if v != int(v):
+                raise ValueError(f"{key} = {v:g} s is not a whole second")
+            off = int(v) % width
+            if off and rung not in FLOORED_RUNGS:
                 raise ValueError(f"{key} = {v:g} s is not on the {width} s grid; the registered widths were chosen "
                                  "to align with every shipped fault boundary")
+            offsets.setdefault(int(float(c["inject_time_s"])), {})[key] = off
+    return offsets
 
 
 def access_shards(corpus_dir):
@@ -332,7 +347,7 @@ def export(corpus_dir, rung, out_dir, workers=1, extras=()):
     if inst.get("instance") != rung:
         raise ValueError(f"--rung {rung!r} but the corpus is a {inst.get('instance')!r} instance")
     cases = read_json(cases_path)["cases"]
-    check_alignment(width, cases)
+    offsets = check_alignment(width, cases, rung)
     plan = ordered_cases(cases)
     epoch_unix, window_s = window_epoch(cfg)
     if window_s != int(window_s) or int(window_s) % width:
@@ -375,6 +390,7 @@ def export(corpus_dir, rung, out_dir, workers=1, extras=()):
         write_json(case_dir / SERVICES_JSON, services_doc)
         case_records.append({"dir": c["dir"], "window_start": epoch_unix + int(c["window_start_s"]), **window,
                              "n_bins_pre": inj - lo, "n_bins_post": hi - inj, "n_rows": hi - lo, "n_empty_cells": n_empty,
+                             "boundary_misalignment_s": offsets[int(c["inject_time_s"])],
                              "sha256": {f: sha256_file(case_dir / f) for f in (DATA_CSV, WINDOW_JSON, SERVICES_JSON)}})
     extra_inputs, extra_results = [], {}
     if EXTRA_TOPOLOGY in extras:
@@ -421,7 +437,8 @@ def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--corpus", required=True, help="a corpus directory holding config.yaml, instantiation.json, labels/ and raw/")
     p.add_argument("--rung", required=True, choices=sorted(BIN_WIDTH_S, key=list(BIN_WIDTH_S).index),
-                   help="selects the registered bin width (xs 30 s, s 15 s, m 60 s); must match the corpus instance")
+                   help="selects the registered bin width (xs 30 s, s 15 s, m 60 s; l 180 s under the relaxed rule of 2026-11-08); "
+                        "must match the corpus instance")
     p.add_argument("--out", required=True, help="the export root; one case-<k>/ per fault plus run/")
     p.add_argument("--workers", type=int, default=1, help="shard parsers run in parallel (rows are pooled before binning)")
     p.add_argument("--extras", nargs="*", default=(), choices=EXTRAS,
