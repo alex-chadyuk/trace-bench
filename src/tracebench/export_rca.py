@@ -70,13 +70,17 @@ from .record import RunRecord, read_json, sha256_file, write_json
 # --- the registered bin-width rule (plan Q9, owner decision 2026-10-14) ----------------------
 GRID_WIDTHS_S = (5, 10, 15, 30, 60, 90, 180, 300)
 RULE_N = 10
-BIN_WIDTH_S = {"xs": 30, "s": 15, "m": 60, "l": 180}
+BIN_WIDTH_S = {"xs": 30, "s": 15, "m": 60, "l": 180, "xl": 180}
 # l (2026-11-08, the harness's dated addendum; a disclosed departure from the N = 10 rule, which has no solution at l):
 # N = 5 at 180 s (the sparsest service's pre-fault median 5, p10 2), >= 5 bins in the shortest fault (exactly 5), and the
 # three l fault boundaries that are not on the 180 s grid (49 020, 62 220, 76 020 s; 60-120 s off) are FLOORED to the
 # bin containing them, the offsets recorded per case. Every xs / s / m boundary stays on its grid and is still refused otherwise.
-FLOORED_RUNGS = ("l",)
-RELAXED_RULE = {"l": {"N": 5, "boundaries": "floored to the containing bin; offsets recorded per case", "decided": "2026-11-08"}}
+# xl (2026-11-10, the harness's dated addendum; the l departure repeated): 180 s, the widest grid width that keeps five bins
+# in the 900 s crash; N = 2 as measured (the sparsest service's pre-fault median 2, p10 0, minimum over the five seeds; l read 5 and 2);
+# the xl fault schedule has the l boundaries, so the same three are floored and recorded.
+FLOORED_RUNGS = ("l", "xl")
+RELAXED_RULE = {"l": {"N": 5, "boundaries": "floored to the containing bin; offsets recorded per case", "decided": "2026-11-08"},
+                "xl": {"N": 2, "boundaries": "floored to the containing bin; offsets recorded per case", "decided": "2026-11-10"}}
 RULE = {
     "statement": ("the smallest grid width at which, on every seed, the sparsest candidate service's pre-fault "
                   "median request count per bin reaches N and its 10th percentile reaches 1, with at least five "
@@ -437,7 +441,7 @@ def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--corpus", required=True, help="a corpus directory holding config.yaml, instantiation.json, labels/ and raw/")
     p.add_argument("--rung", required=True, choices=sorted(BIN_WIDTH_S, key=list(BIN_WIDTH_S).index),
-                   help="selects the registered bin width (xs 30 s, s 15 s, m 60 s; l 180 s under the relaxed rule of 2026-11-08); "
+                   help="selects the registered bin width (xs 30 s, s 15 s, m 60 s; l 180 s under the relaxed rule of 2026-11-08, xl 180 s under that of 2026-11-10); "
                         "must match the corpus instance")
     p.add_argument("--out", required=True, help="the export root; one case-<k>/ per fault plus run/")
     p.add_argument("--workers", type=int, default=1, help="shard parsers run in parallel (rows are pooled before binning)")
