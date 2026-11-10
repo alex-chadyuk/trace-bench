@@ -146,7 +146,7 @@ def test_registered_width_divides_the_shard_and_every_shipped_fault_boundary(run
 
 @pytest.mark.parametrize("rung", sorted(FLOORED_RUNGS))
 def test_floored_rung_width_divides_the_shard_and_floors_exactly_the_registered_boundaries(rung):
-    """l (2026-11-08): 180 s divides the shard and the corpus window, keeps >= 5 bins in every fault, and three of the ten
+    """l (2026-11-08) and xl (2026-11-10, the same fault schedule): 180 s divides the shard and the corpus window, keeps >= 5 bins in every fault, and three of the ten
     fault boundaries sit 60-120 s past a bin edge — floored, and the offsets returned for the record; any other rung with
     an off-grid boundary is still refused."""
     width = BIN_WIDTH_S[rung]
@@ -170,11 +170,11 @@ def test_refusals(exported, tmp_path):
     with pytest.raises(ValueError, match="instance"):
         export(corpus, "s", tmp_path / "wrong-rung")
     with pytest.raises(ValueError, match="registered"):
-        export(corpus, "xl", tmp_path / "no-width")
+        export(corpus, "xxl", tmp_path / "no-width")
     with pytest.raises(FileExistsError):
         export(corpus, "xs", out)  # a replay goes to a new directory
     with pytest.raises(SystemExit):
-        main(["--corpus", str(corpus), "--rung", "xl", "--out", str(tmp_path / "x")])
+        main(["--corpus", str(corpus), "--rung", "xxl", "--out", str(tmp_path / "x")])
 
 
 def test_cli_writes_the_record(exported, tmp_path):
