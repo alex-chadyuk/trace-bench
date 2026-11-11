@@ -143,11 +143,17 @@ A **session** is one client executing one scenario: it arrives at a random time,
 performs step 0, waits a sampled gap, performs step 1, and so on, until it either
 finishes or a step fails terminally. Each step is one **request**: the client
 calls the BFF endpoint, which calls some of its callees, which call some of
-theirs. The request therefore traverses a **request tree**, a *random* subtree
-of the topology rooted at the BFF endpoint: which callees it contains is drawn
-per request from the call probabilities and caches of §2.2, so two requests to
-the same endpoint need not visit the same operations. Every node visit in that
-tree is a **hop**; a retried hop is a second **attempt** of the same op.
+theirs. The request therefore traverses a **request tree** (also called the
+request's *call tree*). Its root is the step's client operation, and the root's
+only child is the BFF endpoint the step calls; that link is fixed by the
+scenario and is not an edge of the topology of §2.2, which holds no client
+operation. Below the BFF endpoint the tree is *random*: which callees it
+contains is drawn per request from the call probabilities and caches of §2.2,
+so two requests to the same endpoint need not visit the same operations. An
+operation is visited at most once per request: when several of its callers
+call it in the same request, it is one node, and its parent is the first of
+those callers in edge order. Every node visit in that tree is a **hop**; a
+retried hop is a second **attempt** of the same op, not a second node.
 
 ### 2.4 Outcomes and the alphabet
 
