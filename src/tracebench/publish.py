@@ -16,6 +16,10 @@ verifies every remote corpus against its own `manifest.json` (present,
 complete, same size and — where the host exposes it — the same sha256), writes
 the dataset card, the licence and `release.json`, and tags the repository.
 Releasing a version whose tag already exists is refused (PRD scenario 14).
+A sample-level truth folder on the host (`sample-level-truth/`, beside
+`instances/` and outside every corpus manifest) is checked against its own
+`index.json`; the card then names it and `release.json` carries a
+`sample_level_truth` block.
 
 Corpora are versioned by the tool version that generated them (every
 `manifest.json` names it); a release is a tag over corpora already uploaded.
@@ -41,12 +45,18 @@ from . import __version__
 from .constants import COMPLETE_MARKER, MANIFEST_JSON, RUN_DIR
 from .log import log
 from .manifest import verify_manifest
-from .record import read_json, write_json
+from .record import read_json, sha256_file, write_json
 
 DEFAULT_REPO = "chadyuk/trace-bench"
 REPO_TYPE = "dataset"
 DEFAULT_REVISION = "main"
 INSTANCES_PREFIX = "instances"
+RELEASE_JSON = "release.json"
+# Sample-level ground truth derived from the corpora: its own top-level folder,
+# because a file a corpus's manifest does not list fails that corpus's `verify`.
+TRUTH_PREFIX = "sample-level-truth"
+TRUTH_INDEX = TRUTH_PREFIX + "/index.json"
+TRUTH_KEY = "sample_level_truth"
 STAGE_DIR_NAME = ".hf-stage"
 # Never uploaded: the run record (host, wall clock, argv) is not part of a
 # corpus, and artifacts.json names the private object store (PRD scenario 20).
@@ -89,7 +99,7 @@ oracle linkage that makes correlation loss a measured quantity. Every corpus
 is wholly synthetic and reproduces byte-identically from its configuration,
 seed, tool version and constants version (see each `manifest.json`).
 
-Generator (MIT): https://github.com/alex-chadyuk/trace-bench — tool version {tool_version}.
+{truth}Generator (MIT): https://github.com/alex-chadyuk/trace-bench — tool version {tool_version}.
 Corpus licence: CC BY 4.0. Fitted realism constants: {constants}.
 
 | instance | variant | seed | alphabet (realized, train) | mechanism nodes | directed / bidirected at floor | edges on a Monte-Carlo estimate (max SE) |
@@ -109,6 +119,19 @@ who wants only exact strengths can drop them. The scorer reads strengths only.
 
 The dataset viewer is disabled: a corpus is a tree of gzipped JSON lines and
 parquet files with several schemas, not one table.
+"""
+
+# The card's paragraph on the sample-level truth folder (`{truth}` above); empty
+# when the host has no such folder.
+CARD_TRUTH = """Sample-level ground truth: `sample-level-truth/` holds, for each latent corpus
+and grain, the truth edges of the sample-level graph of every sampled test
+trace. A truth edge joins two failed attempts of one request and is decided by
+counterfactual replay of that request (but-for and contingent edges; the rule
+and the file format are in the folder's `README.md`, and `index.json` lists
+every file with its size and sha256). The folder sits beside `instances/`,
+outside the corpus manifests, so every corpus still verifies against its own
+`manifest.json`.
+
 """
 
 
@@ -260,6 +283,40 @@ def remote_tree(api, repo, revision=DEFAULT_REVISION):
     return out
 
 
+def plan_truth(api, repo, tree, tmp, problems):
+    """The `sample_level_truth` block of the release index, or None when the host
+    has no `sample-level-truth/index.json`. The folder is outside every corpus
+    manifest, so it is checked against its own index: every indexed file on the
+    host with the indexed size (and sha256, where the host exposes it). `added`,
+    the day the folder reached the host, is carried over from the `release.json`
+    already there."""
+    if TRUTH_INDEX not in tree:
+        return None
+    local = api.hf_hub_download(repo, TRUTH_INDEX, repo_type=REPO_TYPE, revision=DEFAULT_REVISION,
+                                local_dir=str(tmp))
+    files = read_json(local)["files"]
+    for f in files:
+        rp = f"{TRUTH_PREFIX}/{f['path']}"
+        found = tree.get(rp)
+        if found is None:
+            problems.append(f"missing: {rp}")
+        elif found[0] != f["bytes"]:
+            problems.append(f"size differs: {rp} ({found[0]} on the host, {f['bytes']} in the index)")
+        elif found[1] is not None and found[1] != f["sha256"]:
+            problems.append(f"sha256 differs: {rp}")
+    block = {"path": TRUTH_PREFIX, "index": TRUTH_INDEX, "index_sha256": sha256_file(local),
+             "n_files": len(files), "bytes": sum(f["bytes"] for f in files),
+             "corpus_variants": sorted({f["variant"] for f in files}),
+             "grains": sorted({f["grain"] for f in files})}
+    if RELEASE_JSON in tree:
+        previous = read_json(api.hf_hub_download(repo, RELEASE_JSON, repo_type=REPO_TYPE,
+                                                 revision=DEFAULT_REVISION, local_dir=str(tmp)))
+        added = (previous.get(TRUTH_KEY) or {}).get("added")
+        if added:
+            block["added"] = added
+    return block
+
+
 def plan_release(api, repo, version, tmp):
     """Verify every remote corpus against its own manifest and build the release
     metadata. Reads the host; writes only into `tmp`."""
@@ -300,11 +357,13 @@ def plan_release(api, repo, version, tmp):
                 if sha != f["sha256"]:
                     problems.append(f"sha256 differs: {rp}")
         entries.append({"path_in_repo": corpus_path, "manifest": m})
+    truth = plan_truth(api, repo, tree, tmp, problems)
     if problems:
         raise RuntimeError(f"{repo} does not match its manifests ({len(problems)} problems): {problems[:5]}")
     constants = sorted({e["manifest"]["constants_version"] for e in entries})
     tool_versions = sorted({e["manifest"]["tool_version"] for e in entries})
     card = CARD.format(version=version, tool_version=", ".join(tool_versions), constants=", ".join(constants),
+                       truth=CARD_TRUTH if truth else "",
                        rows="\n".join(_row(e["manifest"]) for e in sorted(
                            entries, key=lambda e: (e["manifest"]["instance"], e["manifest"]["variant"],
                                                    e["manifest"]["seed"]))))
@@ -320,6 +379,8 @@ def plan_release(api, repo, version, tmp):
                           "tool_version": e["manifest"]["tool_version"],
                           "n_files": len(e["manifest"]["files"])}
                          for e in sorted(entries, key=lambda e: e["path_in_repo"])]}
+    if truth:
+        index[TRUTH_KEY] = truth
     return entries, card, index
 
 
@@ -334,6 +395,8 @@ def release(version, repo=DEFAULT_REPO, dry_run=False, api=None):
                   "corpora": [e["path_in_repo"] for e in entries],
                   "n_files_verified": index["n_files_verified"],
                   "n_files_sha256_verified": index["n_files_sha256_verified"]}
+        if TRUTH_KEY in index:
+            result[TRUTH_KEY] = index[TRUTH_KEY]
         if dry_run:
             return result
         meta = tmp / "release"
@@ -342,7 +405,7 @@ def release(version, repo=DEFAULT_REPO, dry_run=False, api=None):
         (meta / "LICENSE").write_text(
             "Creative Commons Attribution 4.0 International (CC BY 4.0)\n"
             "https://creativecommons.org/licenses/by/4.0/\n", encoding="utf-8")
-        write_json(meta / "release.json", index)
+        write_json(meta / RELEASE_JSON, index)
         api.upload_folder(repo_id=repo, repo_type=REPO_TYPE, folder_path=str(meta), path_in_repo=".",
                           revision=DEFAULT_REVISION,
                           commit_message=f"trace-bench {version}: release index and card")
