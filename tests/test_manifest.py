@@ -8,6 +8,7 @@ path is exercised end to end (staging tree, duplicate refusal, replace) and so
 is the release path (remote verification against every manifest, tag refusal,
 card and index)."""
 import hashlib
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -255,6 +256,28 @@ def test_release_verifies_the_host_then_tags_it(tmp_path):
     assert dry["n_files_sha256_verified"] == dry["n_files_verified"] > 0
     assert "v0.2.0" not in api.tags and not api.folder_uploads
 
+    # a host without the sample-level truth folder: neither the card nor the index names it
+    _, card, index = plan_release(api, "chadyuk/trace-bench", "v0.2.0", tmp_path / "plan")
+    assert "sample-level-truth" not in card and "sample_level_truth" not in index
+
+    # with the folder: it must match its own index, as a corpus must match its manifest
+    def put(path, data, size=None):
+        api.remote[path] = (len(data) if size is None else size, hashlib.sha256(data).hexdigest(), data)
+
+    truth = b'{"sequences": []}\n'
+    truth_path = "xs/latent/seed=0/seqtruth-forced-ok-counterfactual-request.json"
+    truth_index = json.dumps({"files": [{"path": truth_path, "variant": "latent", "grain": "request",
+                                         "bytes": len(truth), "sha256": hashlib.sha256(truth).hexdigest()}]}).encode()
+    put("sample-level-truth/index.json", truth_index)
+    with pytest.raises(RuntimeError, match="missing: sample-level-truth/xs/latent/seed=0/seqtruth"):
+        release("v0.2.0", repo="chadyuk/trace-bench", api=api)
+    put(f"sample-level-truth/{truth_path}", truth, size=len(truth) + 1)
+    with pytest.raises(RuntimeError, match="size differs: sample-level-truth/xs/latent/seed=0/seqtruth"):
+        release("v0.2.0", repo="chadyuk/trace-bench", api=api)
+    put(f"sample-level-truth/{truth_path}", truth)
+    put("release.json", json.dumps({"sample_level_truth": {"added": "2026-11-13"}}).encode())   # the release index already on the host
+    assert "v0.2.0" not in api.tags and not api.folder_uploads
+
     res = release("v0.2.0", repo="chadyuk/trace-bench", api=api)
     assert res["version"] == "v0.2.0" and "v0.2.0" in api.tags
     card = api.remote["README.md"][2].decode()
@@ -263,7 +286,15 @@ def test_release_verifies_the_host_then_tags_it(tmp_path):
     lines = card.splitlines()
     pointer = "Machine-readable metadata: `croissant.json` at the repository root"
     assert lines[next(i for i, l in enumerate(lines) if l.startswith("Corpus licence:")) + 1].startswith(pointer)
+    # the truth paragraph is the block directly before the generator line
+    first = next(i for i, l in enumerate(lines) if l.startswith("Sample-level ground truth: `sample-level-truth/`"))
+    generator = next(i for i, l in enumerate(lines) if l.startswith("Generator (MIT):"))
+    assert lines[first - 1] == "" and lines[generator - 1] == "" and "" not in lines[first:generator - 1]
     index = api.remote["release.json"][2].decode()
+    block = {"path": "sample-level-truth", "index": "sample-level-truth/index.json",
+             "index_sha256": hashlib.sha256(truth_index).hexdigest(), "n_files": 1, "bytes": len(truth),
+             "corpus_variants": ["latent"], "grains": ["request"], "added": "2026-11-13"}
+    assert json.loads(index)["sample_level_truth"] == block == res["sample_level_truth"]
     assert '"version": "v0.2.0"' in index and '"path": "instances/xs/latent/seed=0"' in index
     assert '"derived_from": null' in index
     assert "LICENSE" in api.remote
